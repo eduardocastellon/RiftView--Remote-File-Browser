@@ -1,11 +1,13 @@
-//! RiftView host service: secure, self-hosted remote access to explicitly
-//! shared directories.
+//! RiftView host service: secure, self-hosted remote access to folders the
+//! host user has explicitly chosen to share.
 //!
-//! Layering (see `planning.md` §3):
-//! - [`filesystem`] knows nothing about HTTP; it exposes safe, confined
-//!   operations on shared roots.
-//! - [`api`] translates HTTP requests into filesystem calls.
-//! - [`storage`] persists small JSON state files atomically.
+//! How the pieces fit together (see `planning.md` §3):
+//!
+//! - [`filesystem`] reads files and folders inside shares. It knows nothing
+//!   about HTTP.
+//! - [`api`] turns HTTP requests into calls to [`filesystem`].
+//! - [`storage`] saves small JSON settings files safely.
+//! - [`server`] wires everything together and starts listening.
 
 pub mod api;
 pub mod config;

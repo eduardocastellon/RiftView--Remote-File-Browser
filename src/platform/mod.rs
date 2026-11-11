@@ -1,7 +1,9 @@
-//! OS-specific behaviour. Keep this module small: only things that genuinely
-//! differ between platforms belong here.
+//! Things that differ between operating systems.
+//!
+//! Keep this module small: only code that genuinely has to be different on
+//! each OS belongs here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -11,35 +13,40 @@ mod macos;
 mod windows;
 
 #[cfg(target_os = "linux")]
-use linux as imp;
+use linux as current_os;
 #[cfg(target_os = "macos")]
-use macos as imp;
+use macos as current_os;
 #[cfg(target_os = "windows")]
-use windows as imp;
+use windows as current_os;
 
-/// Environment variable that overrides the application data directory.
+/// Set this environment variable to store settings somewhere other than
+/// the OS default location.
 pub const DATA_DIR_ENV: &str = "RIFTVIEW_DATA_DIR";
 
-/// Directory holding config and state files.
+/// The folder where RiftView keeps its settings and state files.
 pub fn data_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(dir));
+    let override_dir = std::env::var_os(DATA_DIR_ENV).filter(|value| !value.is_empty());
+
+    match override_dir {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => current_os::default_data_dir(),
     }
-    imp::default_data_dir()
 }
 
-/// Restrict a freshly written state file so only the current user can read it.
-pub fn restrict_file_permissions(path: &std::path::Path) -> std::io::Result<()> {
-    imp::restrict_file_permissions(path)
+/// Make a settings file readable only by the current user.
+pub fn make_file_private(path: &Path) -> std::io::Result<()> {
+    current_os::make_file_private(path)
 }
 
-/// Restrict the data directory so only the current user can access it.
-pub fn restrict_dir_permissions(path: &std::path::Path) -> std::io::Result<()> {
-    imp::restrict_dir_permissions(path)
+/// Make a folder accessible only by the current user.
+pub fn make_dir_private(path: &Path) -> std::io::Result<()> {
+    current_os::make_dir_private(path)
 }
 
+/// Shared helper for macOS and Linux: set Unix permission bits.
 #[cfg(unix)]
-fn chmod(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
+fn set_unix_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
+
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }

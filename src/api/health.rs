@@ -4,13 +4,16 @@ use serde_json::{Value, json};
 
 use crate::state::AppState;
 
-/// Minimal liveness probe; reveals nothing about the host.
+/// "Is the server up?" Deliberately says nothing about the host.
 pub async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
 pub async fn version() -> Json<Value> {
-    Json(json!({ "name": env!("CARGO_PKG_NAME"), "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 // TODO(phase 4): require an authenticated device.

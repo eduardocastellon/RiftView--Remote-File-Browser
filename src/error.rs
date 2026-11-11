@@ -1,5 +1,7 @@
-//! HTTP-facing error type. Messages are safe to show clients: they never
-//! include host filesystem paths or OS error strings.
+//! Errors as clients see them.
+//!
+//! Every message here is safe to send over the network: none of them
+//! include real host paths or raw OS error text.
 
 use axum::Json;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -13,21 +15,29 @@ use crate::filesystem::roots::ShareError;
 pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
+
     #[error("not found")]
     NotFound,
+
     #[error("access denied")]
     Forbidden,
+
     #[error("{0}")]
     Conflict(String),
+
     #[error("range not satisfiable")]
-    RangeNotSatisfiable { size: u64 },
+    RangeNotSatisfiable { file_size: u64 },
+
     #[error("{0}")]
     Unavailable(String),
+
+    /// Details are logged on the server, never sent to the client.
     #[error("internal error")]
     Internal,
 }
 
 impl AppError {
+    /// HTTP status, plus a short machine-readable code for the JSON body.
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
@@ -44,33 +54,37 @@ impl AppError {
 }
 
 impl IntoResponse for AppError {
+    /// Produces e.g. `{"error": {"code": "not_found", "message": "not found"}}`.
     fn into_response(self) -> Response {
         let (status, code) = self.status_and_code();
-        let body = Json(json!({ "error": { "code": code, "message": self.to_string() } }));
-        let mut res = (status, body).into_response();
-        if let AppError::RangeNotSatisfiable { size } = self
-            && let Ok(v) = HeaderValue::from_str(&format!("bytes */{size}"))
+        let body = json!({ "error": { "code": code, "message": self.to_string() } });
+        let mut response = (status, Json(body)).into_response();
+
+        // HTTP says a 416 response should tell the client the real file size.
+        if let AppError::RangeNotSatisfiable { file_size } = self
+            && let Ok(value) = HeaderValue::from_str(&format!("bytes */{file_size}"))
         {
-            res.headers_mut().insert(header::CONTENT_RANGE, v);
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
         }
-        res
+
+        response
     }
 }
 
 impl From<FsError> for AppError {
-    fn from(e: FsError) -> Self {
-        match e {
+    fn from(error: FsError) -> Self {
+        match error {
             FsError::NotFound => AppError::NotFound,
             FsError::NotADirectory => AppError::BadRequest("not a directory".into()),
             FsError::NotAFile => AppError::BadRequest("not a file".into()),
-            FsError::InvalidPath(why) => AppError::BadRequest(format!("invalid path: {why}")),
+            FsError::InvalidPath(reason) => AppError::BadRequest(format!("invalid path: {reason}")),
             FsError::AccessDenied => AppError::Forbidden,
-            FsError::TooManyEntries(n) => {
-                AppError::Conflict(format!("directory has more than {n} entries"))
+            FsError::TooManyEntries(limit) => {
+                AppError::Conflict(format!("directory has more than {limit} entries"))
             }
             FsError::RootUnavailable => AppError::Unavailable("share is unavailable".into()),
-            FsError::Io(err) => {
-                tracing::error!(error = %err, "filesystem I/O error");
+            FsError::Io(io_error) => {
+                tracing::error!(error = %io_error, "filesystem I/O error");
                 AppError::Internal
             }
         }
@@ -78,13 +92,13 @@ impl From<FsError> for AppError {
 }
 
 impl From<ShareError> for AppError {
-    fn from(e: ShareError) -> Self {
-        match e {
+    fn from(error: ShareError) -> Self {
+        match error {
             ShareError::NotFound => AppError::NotFound,
-            ShareError::Invalid(why) => AppError::BadRequest(why.into()),
-            ShareError::Overlap => AppError::Conflict(e.to_string()),
+            ShareError::Invalid(reason) => AppError::BadRequest(reason.into()),
+            ShareError::Overlap => AppError::Conflict(error.to_string()),
             ShareError::UnsupportedVersion(_) | ShareError::Io(_) => {
-                tracing::error!(error = %e, "share store error");
+                tracing::error!(%error, "share store error");
                 AppError::Internal
             }
         }

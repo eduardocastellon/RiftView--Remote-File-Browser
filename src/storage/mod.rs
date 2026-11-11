@@ -1,57 +1,83 @@
-//! Small local state files (no database). Every write is atomic: write to a
-//! temp file in the same directory, fsync, then rename over the target.
+//! Saving and loading small JSON files (there is no database).
+//!
+//! Every save is "atomic": we write the new contents to a temporary file
+//! next to the real one, flush it to disk, then rename it over the real
+//! file. If the computer crashes halfway through, you end up with either
+//! the old file or the new one, never a half-written mix.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::platform;
 
-/// Read a JSON file. Returns `Ok(None)` if it does not exist.
+/// Read and parse a JSON file. Returns `Ok(None)` if the file doesn't exist.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> std::io::Result<Option<T>> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
+
+    Ok(Some(value))
 }
 
-/// Atomically replace `path` with the JSON encoding of `value`.
+/// Replace the file at `path` with `value` encoded as JSON, atomically.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    let dir = path
+    let folder = path
         .parent()
-        .ok_or_else(|| std::io::Error::other("state file has no parent directory"))?;
-    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+        .ok_or_else(|| std::io::Error::other("state file has no parent folder"))?;
+    let contents = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
 
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
-    let tmp = dir.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state");
+    let unique_suffix = uuid::Uuid::new_v4().simple();
+    let temp_path = folder.join(format!(".{file_name}.{unique_suffix}.tmp"));
 
-    let result = (|| {
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        platform::restrict_file_permissions(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, path)?;
-        // Persist the rename itself (directory entry) on Unix.
-        #[cfg(unix)]
-        std::fs::File::open(dir)?.sync_all()?;
-        Ok(())
-    })();
+    let result = write_then_rename(&temp_path, path, &contents);
 
+    // If anything went wrong, don't leave the temp file lying around.
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&temp_path);
     }
     result
 }
 
-/// Create the data directory (owner-only) if needed.
+fn write_then_rename(temp_path: &Path, final_path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    // `create_new` fails if the file already exists, so we never clobber
+    // anything by accident.
+    let mut temp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)?;
+    platform::make_file_private(temp_path)?;
+
+    temp_file.write_all(contents)?;
+    temp_file.sync_all()?; // Make sure the bytes are physically on disk.
+    drop(temp_file);
+
+    std::fs::rename(temp_path, final_path)?;
+
+    // On Unix, the rename itself lives in the folder's entry list; flush
+    // the folder too so the rename survives a crash.
+    #[cfg(unix)]
+    if let Some(folder) = final_path.parent() {
+        std::fs::File::open(folder)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
+/// Create the data folder (private to the current user) if it's missing.
 pub fn ensure_data_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    platform::restrict_dir_permissions(dir)
+    platform::make_dir_private(dir)
 }
 
 #[cfg(test)]
@@ -59,19 +85,25 @@ mod tests {
     use super::*;
 
     #[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
-    struct Doc {
-        n: u32,
+    struct Counter {
+        count: u32,
     }
 
     #[test]
-    fn roundtrip_and_overwrite() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("x.json");
-        assert_eq!(read_json::<Doc>(&p).unwrap(), None);
-        write_json_atomic(&p, &Doc { n: 1 }).unwrap();
-        write_json_atomic(&p, &Doc { n: 2 }).unwrap();
-        assert_eq!(read_json::<Doc>(&p).unwrap(), Some(Doc { n: 2 }));
-        // No temp files left behind.
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    fn saves_overwrites_and_reloads() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("counter.json");
+
+        assert_eq!(read_json::<Counter>(&path).unwrap(), None);
+
+        write_json_atomic(&path, &Counter { count: 1 }).unwrap();
+        write_json_atomic(&path, &Counter { count: 2 }).unwrap();
+        assert_eq!(
+            read_json::<Counter>(&path).unwrap(),
+            Some(Counter { count: 2 })
+        );
+
+        let files_in_folder = std::fs::read_dir(folder.path()).unwrap().count();
+        assert_eq!(files_in_folder, 1, "temp files were left behind");
     }
 }

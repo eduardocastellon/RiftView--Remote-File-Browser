@@ -1,4 +1,4 @@
-//! Host configuration, persisted as `config.json` in the data directory.
+//! Host settings, saved as `config.json` in the data folder.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -7,27 +7,37 @@ use serde::{Deserialize, Serialize};
 
 use crate::storage;
 
+/// Bump this when the layout of `config.json` changes.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Set this environment variable (e.g. `127.0.0.1:9000`) to override the
+/// listen address without editing `config.json`.
 pub const BIND_ENV: &str = "RIFTVIEW_BIND";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default)] // Any missing field in config.json falls back to its default.
 pub struct Config {
     pub schema_version: u32,
-    /// Address to listen on. Until device authentication and TLS land
-    /// (phase 4), only loopback addresses are accepted.
+
+    /// Address and port to listen on. Until device authentication and
+    /// HTTPS exist (phase 4), only loopback addresses are allowed.
     pub bind: SocketAddr,
-    /// Friendly name shown to clients.
+
+    /// Friendly name shown to connecting devices.
     pub host_name: String,
-    /// Hard cap on `limit` for directory listings.
+
+    /// The most entries a client may request in one page of a folder listing.
     pub max_list_limit: usize,
-    /// Directories with more entries than this are rejected rather than
-    /// sorted in memory.
+
+    /// Folders with more entries than this are refused rather than loaded
+    /// into memory for sorting.
     pub max_dir_entries: usize,
-    /// Time allowed to produce response headers. Does not bound streaming
-    /// download bodies.
+
+    /// How long a request may take before the response starts. This does
+    /// not limit how long a download may take to stream.
     pub request_timeout_secs: u64,
-    /// Max size of a non-transfer request body (JSON etc.).
+
+    /// Largest allowed request body for ordinary (non-upload) requests.
     pub max_request_body_bytes: usize,
 }
 
@@ -46,8 +56,8 @@ impl Default for Config {
 }
 
 fn default_host_name() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
+    std::env::var("HOSTNAME") // macOS / Linux
+        .or_else(|_| std::env::var("COMPUTERNAME")) // Windows
         .unwrap_or_else(|_| "RiftView Host".to_string())
 }
 
@@ -55,34 +65,44 @@ fn default_host_name() -> String {
 pub enum ConfigError {
     #[error("could not determine application data directory; set RIFTVIEW_DATA_DIR")]
     NoDataDir,
+
     #[error("unsupported config schema_version {0} (expected {CONFIG_SCHEMA_VERSION})")]
     UnsupportedVersion(u32),
+
     #[error("invalid {BIND_ENV} value: {0}")]
     BadBindEnv(String),
+
     #[error("config I/O: {0}")]
     Io(#[from] std::io::Error),
 }
 
 impl Config {
-    /// Load `config.json` from `data_dir`, writing defaults if missing, then
-    /// apply environment overrides (not persisted).
+    /// Load `config.json` from the data folder, creating it with default
+    /// values on first run. Environment variable overrides are applied
+    /// afterwards and are not saved back to the file.
     pub fn load_or_init(data_dir: &Path) -> Result<Self, ConfigError> {
         let path = config_path(data_dir);
-        let mut cfg = match storage::read_json::<Config>(&path)? {
-            Some(cfg) => cfg,
+
+        let mut config = match storage::read_json::<Config>(&path)? {
+            Some(saved) => saved,
             None => {
-                let cfg = Config::default();
-                storage::write_json_atomic(&path, &cfg)?;
-                cfg
+                let defaults = Config::default();
+                storage::write_json_atomic(&path, &defaults)?;
+                defaults
             }
         };
-        if cfg.schema_version != CONFIG_SCHEMA_VERSION {
-            return Err(ConfigError::UnsupportedVersion(cfg.schema_version));
+
+        if config.schema_version != CONFIG_SCHEMA_VERSION {
+            return Err(ConfigError::UnsupportedVersion(config.schema_version));
         }
-        if let Ok(bind) = std::env::var(BIND_ENV) {
-            cfg.bind = bind.parse().map_err(|_| ConfigError::BadBindEnv(bind))?;
+
+        if let Ok(bind_override) = std::env::var(BIND_ENV) {
+            config.bind = bind_override
+                .parse()
+                .map_err(|_| ConfigError::BadBindEnv(bind_override))?;
         }
-        Ok(cfg)
+
+        Ok(config)
     }
 }
 

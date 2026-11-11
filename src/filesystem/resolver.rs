@@ -1,9 +1,9 @@
-//! Client-supplied path validation.
+//! Checking paths sent by clients.
 //!
 //! [`RelPath`] is the only way to name something inside a share. Parsing is
-//! strict and lexical; it is a first line of defence; the second (and
-//! authoritative) one is `cap-std`'s confined resolution in
-//! [`super::roots::Share::open_root`] and friends.
+//! strict: anything suspicious is rejected, not "cleaned up". This is the
+//! first line of defence. The second, and the one that really counts, is
+//! `cap-std`'s confined lookup (see the `filesystem` module docs).
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -11,12 +11,13 @@ use std::path::{Component, Path, PathBuf};
 use super::FsError;
 
 const MAX_PATH_BYTES: usize = 4096;
-const MAX_COMPONENT_BYTES: usize = 255;
+const MAX_NAME_BYTES: usize = 255;
 
-/// A validated path relative to a share root. Empty means the root itself.
+/// A checked path relative to a share's root, stored as a list of names.
+/// An empty list means the root folder itself.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RelPath {
-    components: Vec<String>,
+    names: Vec<String>,
 }
 
 impl RelPath {
@@ -26,9 +27,10 @@ impl RelPath {
 
     /// Parse a client path such as `/Documents/report.pdf` or `Documents`.
     ///
-    /// Rules: `/` is the only separator; empty and `.` segments are ignored;
-    /// `..`, backslashes, NUL, drive letters / prefixes and other special
-    /// components are rejected outright (never "normalised away").
+    /// - `/` is the only separator.
+    /// - Empty segments (`//`) and `.` are ignored.
+    /// - `..`, backslashes, NUL bytes, control characters, and anything the
+    ///   OS would treat specially (like `C:` on Windows) are rejected.
     pub fn parse(raw: &str) -> Result<Self, FsError> {
         if raw.len() > MAX_PATH_BYTES {
             return Err(FsError::InvalidPath("path too long"));
@@ -40,75 +42,91 @@ impl RelPath {
             return Err(FsError::InvalidPath("backslash not allowed"));
         }
 
-        let mut components = Vec::new();
-        for seg in raw.split('/') {
-            match seg {
-                "" | "." => continue,
-                ".." => return Err(FsError::InvalidPath("'..' not allowed")),
-                _ => {}
+        let mut names = Vec::new();
+
+        for segment in raw.split('/') {
+            if segment.is_empty() || segment == "." {
+                continue;
             }
-            if seg.len() > MAX_COMPONENT_BYTES {
-                return Err(FsError::InvalidPath("path component too long"));
-            }
-            if seg.chars().any(|c| c.is_control()) {
-                return Err(FsError::InvalidPath("control character"));
-            }
-            // Reject anything the host OS would not treat as a single plain
-            // name (e.g. `C:` on Windows).
-            let mut parsed = Path::new(seg).components();
-            match (parsed.next(), parsed.next()) {
-                (Some(Component::Normal(n)), None) if n == seg => {}
-                _ => return Err(FsError::InvalidPath("invalid path component")),
-            }
-            #[cfg(windows)]
-            if seg.contains(':') {
-                // Alternate data streams / drive-relative paths.
-                return Err(FsError::InvalidPath("':' not allowed"));
-            }
-            components.push(seg.to_owned());
+            check_name(segment)?;
+            names.push(segment.to_owned());
         }
-        Ok(Self { components })
+
+        Ok(Self { names })
     }
 
     pub fn is_root(&self) -> bool {
-        self.components.is_empty()
+        self.names.is_empty()
     }
 
-    /// Final component, if any.
+    /// The last name in the path (the file or folder itself), if any.
     pub fn file_name(&self) -> Option<&str> {
-        self.components.last().map(String::as_str)
+        self.names.last().map(String::as_str)
     }
 
-    /// Append a single already-validated entry name (from `read_dir`).
+    /// A new path with one more name on the end, e.g. `/a` + `b` = `/a/b`.
     pub fn join_name(&self, name: &str) -> Result<Self, FsError> {
-        let child = Self::parse(name)?;
-        if child.components.len() != 1 {
+        if name.is_empty() || name == "." || name.contains('/') || name.contains('\\') {
             return Err(FsError::InvalidPath("invalid entry name"));
         }
-        let mut out = self.clone();
-        out.components.extend(child.components);
-        Ok(out)
+        check_name(name)?;
+
+        let mut joined = self.clone();
+        joined.names.push(name.to_owned());
+        Ok(joined)
     }
 
-    /// Relative path for use *only* with a `cap_std::fs::Dir` opened at the
-    /// share root. `"."` for the root.
+    /// The path in a form to hand *only* to a `cap_std::fs::Dir` opened on
+    /// the share root. The root itself becomes `"."`.
     pub(crate) fn to_cap_path(&self) -> PathBuf {
-        if self.components.is_empty() {
+        if self.names.is_empty() {
             PathBuf::from(".")
         } else {
-            self.components.iter().collect()
+            self.names.iter().collect()
         }
     }
 }
 
+/// Reject a single path segment that isn't a plain, ordinary name.
+fn check_name(name: &str) -> Result<(), FsError> {
+    if name == ".." {
+        return Err(FsError::InvalidPath("'..' not allowed"));
+    }
+    if name.len() > MAX_NAME_BYTES {
+        return Err(FsError::InvalidPath("path component too long"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(FsError::InvalidPath("control character"));
+    }
+
+    // Ask the OS's own path parser: is this exactly one ordinary name?
+    // This catches things like `C:` on Windows.
+    let mut components = Path::new(name).components();
+    let is_single_plain_name = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(only)), None) if only == name
+    );
+    if !is_single_plain_name {
+        return Err(FsError::InvalidPath("invalid path component"));
+    }
+
+    // On Windows, `:` is used for drive letters and hidden data streams.
+    #[cfg(windows)]
+    if name.contains(':') {
+        return Err(FsError::InvalidPath("':' not allowed"));
+    }
+
+    Ok(())
+}
+
 impl fmt::Display for RelPath {
-    /// Client-facing form: always starts with `/`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.components.is_empty() {
-            return f.write_str("/");
+    /// The form clients see: always starts with `/`, e.g. `/Documents/a.txt`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.names.is_empty() {
+            return formatter.write_str("/");
         }
-        for c in &self.components {
-            write!(f, "/{c}")?;
+        for name in &self.names {
+            write!(formatter, "/{name}")?;
         }
         Ok(())
     }
@@ -118,43 +136,46 @@ impl fmt::Display for RelPath {
 mod tests {
     use super::*;
 
-    fn ok(s: &str) -> String {
-        RelPath::parse(s).unwrap().to_string()
+    fn parsed(input: &str) -> String {
+        RelPath::parse(input).unwrap().to_string()
     }
 
-    fn bad(s: &str) {
-        assert!(RelPath::parse(s).is_err(), "expected {s:?} to be rejected");
+    fn assert_rejected(input: &str) {
+        assert!(
+            RelPath::parse(input).is_err(),
+            "expected {input:?} to be rejected"
+        );
     }
 
     #[test]
-    fn accepts_and_normalises() {
-        assert_eq!(ok(""), "/");
-        assert_eq!(ok("/"), "/");
-        assert_eq!(ok("/Documents"), "/Documents");
-        assert_eq!(ok("Documents/"), "/Documents");
-        assert_eq!(ok("//a/./b//"), "/a/b");
-        assert_eq!(ok("/my file.txt"), "/my file.txt");
-        assert_eq!(ok("/..hidden"), "/..hidden");
-        assert_eq!(ok("/ünïcödé"), "/ünïcödé");
+    fn accepts_and_tidies_ordinary_paths() {
+        assert_eq!(parsed(""), "/");
+        assert_eq!(parsed("/"), "/");
+        assert_eq!(parsed("/Documents"), "/Documents");
+        assert_eq!(parsed("Documents/"), "/Documents");
+        assert_eq!(parsed("//a/./b//"), "/a/b");
+        assert_eq!(parsed("/my file.txt"), "/my file.txt");
+        assert_eq!(parsed("/..hidden"), "/..hidden");
+        assert_eq!(parsed("/ünïcödé"), "/ünïcödé");
     }
 
     #[test]
     fn rejects_traversal_and_injection() {
-        bad("..");
-        bad("/..");
-        bad("/a/../b");
-        bad("a/..");
-        bad("..\\etc");
-        bad("C:\\Windows");
-        bad("\\\\server\\share");
-        bad("/a\0b");
-        bad("/a\nb");
-        bad(&"a".repeat(300));
-        bad(&"/a".repeat(3000));
+        assert_rejected("..");
+        assert_rejected("/..");
+        assert_rejected("/a/../b");
+        assert_rejected("a/..");
+        assert_rejected("..\\etc");
+        assert_rejected("C:\\Windows");
+        assert_rejected("\\\\server\\share");
+        assert_rejected("/a\0b");
+        assert_rejected("/a\nb");
+        assert_rejected(&"a".repeat(300));
+        assert_rejected(&"/a".repeat(3000));
     }
 
     #[test]
-    fn join_name_rejects_multi_component() {
+    fn join_name_only_accepts_a_single_name() {
         let base = RelPath::parse("/a").unwrap();
         assert_eq!(base.join_name("b").unwrap().to_string(), "/a/b");
         assert!(base.join_name("b/c").is_err());

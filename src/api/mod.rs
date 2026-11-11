@@ -1,5 +1,7 @@
-//! HTTP routing. Handlers stay thin: validate input, call into
-//! [`crate::filesystem`], serialise the result.
+//! HTTP routes.
+//!
+//! Handlers are kept thin: check the input, call into
+//! [`crate::filesystem`], and turn the result into JSON.
 
 mod files;
 mod health;
@@ -13,17 +15,23 @@ use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        // Host information
         .route("/api/health", get(health::health))
         .route("/api/version", get(health::version))
         .route("/api/host", get(health::host))
+        // Shares
         .route("/api/shares", get(shares::list).post(shares::create))
         .route(
             "/api/shares/{id}",
-            get(shares::get_one).patch(shares::update).delete(shares::remove),
+            get(shares::get_one)
+                .patch(shares::update)
+                .delete(shares::remove),
         )
+        // Files
         .route("/api/shares/{id}/files", get(files::browse))
         .route("/api/files/{id}", get(files::metadata))
         .route("/api/files/{id}/download", get(files::download))
+        // Anything else is a JSON 404.
         .fallback(|| async { AppError::NotFound })
         .with_state(state)
 }

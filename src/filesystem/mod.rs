@@ -1,13 +1,19 @@
-//! Filesystem access confined to explicitly shared roots.
+//! Reading files and folders inside shares, without ever escaping them.
 //!
-//! This module is independent of HTTP. Callers never build host paths:
-//! they pass a [`roots::Share`] plus a validated [`RelPath`], and every
-//! filesystem call goes through a `cap_std::fs::Dir` handle opened on the
-//! share root. `cap-std` resolves paths component by component relative to
-//! that handle (using `openat2(RESOLVE_BENEATH)` on Linux and equivalent
-//! handle-based logic elsewhere), so `..`, absolute paths and symlinks that
-//! point outside the root are rejected by the resolver itself — not by a
-//! string-prefix check that could be raced.
+//! This module knows nothing about HTTP.
+//!
+//! ## How we stay inside a share
+//!
+//! Callers never build real host paths. They pass a [`roots::Share`] and a
+//! checked [`RelPath`] ("a path relative to the share"). Every filesystem
+//! call then goes through a `cap_std::fs::Dir`, which is an open handle on
+//! the share's root folder.
+//!
+//! `cap-std` asks the operating system to look up each path *relative to
+//! that handle* and to refuse anything that would leave it. So `..`,
+//! absolute paths, and symlinks pointing outside the share are blocked by
+//! the OS itself. That is much stronger than checking whether a path string
+//! starts with the share's path, which can be tricked or raced.
 
 pub mod browser;
 pub mod ids;
@@ -19,47 +25,58 @@ pub mod roots;
 pub use ids::FileId;
 pub use resolver::RelPath;
 
+use std::io::ErrorKind;
+
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {
     #[error("not found")]
     NotFound,
+
     #[error("not a directory")]
     NotADirectory,
+
     #[error("not a file")]
     NotAFile,
+
     #[error("invalid path: {0}")]
     InvalidPath(&'static str),
-    /// Includes attempts to escape the share root.
+
+    /// Also returned when a path tries to escape the share.
     #[error("access denied")]
     AccessDenied,
+
     #[error("directory has too many entries ({0} max)")]
     TooManyEntries(usize),
+
+    /// The share's folder was deleted, moved, or is on a disconnected drive.
     #[error("share root is unavailable")]
     RootUnavailable,
+
     #[error("I/O error: {0}")]
     Io(std::io::Error),
 }
 
 impl From<std::io::Error> for FsError {
-    fn from(e: std::io::Error) -> Self {
-        use std::io::ErrorKind::*;
-        match e.kind() {
-            NotFound => FsError::NotFound,
-            PermissionDenied => FsError::AccessDenied,
-            NotADirectory => FsError::NotADirectory,
-            IsADirectory => FsError::NotAFile,
-            _ => FsError::Io(e),
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            ErrorKind::NotFound => FsError::NotFound,
+            ErrorKind::PermissionDenied => FsError::AccessDenied,
+            ErrorKind::NotADirectory => FsError::NotADirectory,
+            ErrorKind::IsADirectory => FsError::NotAFile,
+            _ => FsError::Io(error),
         }
     }
 }
 
-/// Run blocking filesystem work off the async runtime.
-pub(crate) async fn blocking<T, F>(f: F) -> Result<T, FsError>
+/// Run slow, blocking filesystem work on a background thread so it doesn't
+/// stall the async server.
+pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, FsError>
 where
     F: FnOnce() -> Result<T, FsError> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| FsError::Io(std::io::Error::other(e)))?
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(join_error) => Err(FsError::Io(std::io::Error::other(join_error))),
+    }
 }
