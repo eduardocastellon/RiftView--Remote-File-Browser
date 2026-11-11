@@ -19,9 +19,20 @@ pub const BIND_ENV: &str = "RIFTVIEW_BIND";
 pub struct Config {
     pub schema_version: u32,
 
-    /// Address and port to listen on. Until device authentication and
-    /// HTTPS exist (phase 4), only loopback addresses are allowed.
+    /// Address and port for the HTTPS API that devices connect to.
+    /// `0.0.0.0` means every network interface: your LAN, and VPNs such as
+    /// Tailscale, Radmin or Hamachi.
     pub bind: SocketAddr,
+
+    /// Address for the host-only admin API (used by `riftview-api pair`,
+    /// `share`, `devices`…). Must be a loopback address.
+    pub admin_bind: SocketAddr,
+
+    /// How long a device stays logged in before signing a new challenge.
+    pub session_lifetime_secs: u64,
+
+    /// Pairing and login requests allowed per IP address per minute.
+    pub auth_rate_limit_per_minute: u32,
 
     /// Friendly name shown to connecting devices.
     pub host_name: String,
@@ -45,7 +56,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             schema_version: CONFIG_SCHEMA_VERSION,
-            bind: SocketAddr::from(([127, 0, 0, 1], 7878)),
+            bind: SocketAddr::from(([0, 0, 0, 0], 7878)),
+            admin_bind: SocketAddr::from(([127, 0, 0, 1], 7879)),
+            session_lifetime_secs: 60 * 60,
+            auth_rate_limit_per_minute: 20,
             host_name: default_host_name(),
             max_list_limit: 1000,
             max_dir_entries: 100_000,

@@ -8,6 +8,9 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::auth::devices::DeviceError;
+use crate::auth::pairing::PairingError;
+use crate::auth::sessions::LoginError;
 use crate::filesystem::FsError;
 use crate::filesystem::roots::ShareError;
 
@@ -16,17 +19,25 @@ pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
 
-    #[error("not found")]
-    NotFound,
+    /// No valid login. Clients should (re-)authenticate.
+    #[error("authentication required")]
+    Unauthorized,
 
+    /// Logged in, but not allowed to do this.
     #[error("access denied")]
     Forbidden,
+
+    #[error("not found")]
+    NotFound,
 
     #[error("{0}")]
     Conflict(String),
 
     #[error("range not satisfiable")]
     RangeNotSatisfiable { file_size: u64 },
+
+    #[error("too many requests; slow down")]
+    TooManyRequests,
 
     #[error("{0}")]
     Unavailable(String),
@@ -41,12 +52,14 @@ impl AppError {
     fn status_and_code(&self) -> (StatusCode, &'static str) {
         match self {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::RangeNotSatisfiable { .. } => {
                 (StatusCode::RANGE_NOT_SATISFIABLE, "range_not_satisfiable")
             }
+            AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
             AppError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
@@ -59,6 +72,13 @@ impl IntoResponse for AppError {
         let (status, code) = self.status_and_code();
         let body = json!({ "error": { "code": code, "message": self.to_string() } });
         let mut response = (status, Json(body)).into_response();
+
+        // HTTP says a 401 response should name the login scheme.
+        if matches!(self, AppError::Unauthorized) {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
 
         // HTTP says a 416 response should tell the client the real file size.
         if let AppError::RangeNotSatisfiable { file_size } = self
@@ -99,6 +119,40 @@ impl From<ShareError> for AppError {
             ShareError::Overlap => AppError::Conflict(error.to_string()),
             ShareError::UnsupportedVersion(_) | ShareError::Io(_) => {
                 tracing::error!(%error, "share store error");
+                AppError::Internal
+            }
+        }
+    }
+}
+
+impl From<PairingError> for AppError {
+    fn from(error: PairingError) -> Self {
+        match error {
+            PairingError::Failed => AppError::Forbidden,
+            PairingError::Invalid(reason) => AppError::BadRequest(reason.into()),
+            PairingError::NoSession
+            | PairingError::Expired
+            | PairingError::AlreadyClaimed
+            | PairingError::WrongStep => AppError::Conflict(error.to_string()),
+        }
+    }
+}
+
+impl From<LoginError> for AppError {
+    fn from(error: LoginError) -> Self {
+        match error {
+            LoginError::Failed => AppError::Unauthorized,
+            LoginError::Busy => AppError::TooManyRequests,
+        }
+    }
+}
+
+impl From<DeviceError> for AppError {
+    fn from(error: DeviceError) -> Self {
+        match error {
+            DeviceError::NotFound => AppError::NotFound,
+            DeviceError::UnsupportedVersion(_) | DeviceError::Io(_) => {
+                tracing::error!(%error, "device store error");
                 AppError::Internal
             }
         }

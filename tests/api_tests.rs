@@ -4,16 +4,13 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{TestHost, body_bytes, entry_names};
+use common::{TestHost, authed_get, body_bytes, entry_names};
 use serde_json::json;
 
-fn get_request(uri: &str) -> Request<Body> {
-    Request::get(uri).body(Body::empty()).unwrap()
-}
-
-fn range_request(uri: &str, range: &str) -> Request<Body> {
+fn range_request(uri: &str, range: &str, token: &str) -> Request<Body> {
     Request::get(uri)
         .header("range", range)
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap()
 }
@@ -44,7 +41,7 @@ async fn unknown_route_is_json_404() {
 // --- Shares ----------------------------------------------------------------
 
 #[tokio::test]
-async fn share_crud_hides_host_path() {
+async fn devices_see_shares_without_host_path() {
     let host = TestHost::new().await;
 
     let (status, body) = host.get_json("/api/shares").await;
@@ -55,18 +52,37 @@ async fn share_crud_hides_host_path() {
         "host path leaked: {body}"
     );
     assert_eq!(body["shares"][0]["writable"], false);
+}
+
+#[tokio::test]
+async fn devices_cannot_manage_shares() {
+    let host = TestHost::new().await;
+    let request = json!({ "name": "x", "path": host.outside_dir.path() });
+    let (status, _) = host.send_json("POST", "/api/shares", Some(request)).await;
+    assert_ne!(status, StatusCode::CREATED);
 
     let share_uri = format!("/api/shares/{}", host.share_id);
+    let (status, _) = host.send_json("DELETE", &share_uri, None).await;
+    assert_ne!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn host_manages_shares_through_admin_api() {
+    let host = TestHost::new().await;
+    let share_uri = format!("/admin/shares/{}", host.share_id);
+
     let changes = json!({ "name": "Renamed", "writable": true });
-    let (status, body) = host.send_json("PATCH", &share_uri, Some(changes)).await;
+    let (status, body) = host.admin_json("PATCH", &share_uri, Some(changes)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["name"], "Renamed");
     assert_eq!(body["writable"], true);
 
-    let (status, _) = host.send_json("DELETE", &share_uri, None).await;
+    let (status, _) = host.admin_json("DELETE", &share_uri, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _) = host.get_json(&share_uri).await;
+    let (status, _) = host
+        .get_json(&format!("/api/shares/{}", host.share_id))
+        .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -76,18 +92,20 @@ async fn share_registration_validation() {
 
     let relative_path = json!({ "name": "x", "path": "relative" });
     let (status, _) = host
-        .send_json("POST", "/api/shares", Some(relative_path))
+        .admin_json("POST", "/admin/shares", Some(relative_path))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let inside_existing = json!({ "name": "dup", "path": host.shared_path().join("Documents") });
     let (status, _) = host
-        .send_json("POST", "/api/shares", Some(inside_existing))
+        .admin_json("POST", "/admin/shares", Some(inside_existing))
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     let data_dir = json!({ "name": "data", "path": host.data_dir.path() });
-    let (status, _) = host.send_json("POST", "/api/shares", Some(data_dir)).await;
+    let (status, _) = host
+        .admin_json("POST", "/admin/shares", Some(data_dir))
+        .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -164,7 +182,7 @@ async fn download_whole_file_and_ranges() {
     let file_id = host.id_of("/Documents", "notes.txt").await;
     let uri = format!("/api/files/{file_id}/download");
 
-    let response = host.send(get_request(&uri)).await;
+    let response = host.send(authed_get(&uri, &host.token)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let headers = response.headers();
     assert_eq!(headers["accept-ranges"], "bytes");
@@ -177,15 +195,21 @@ async fn download_whole_file_and_ranges() {
     );
     assert_eq!(body_bytes(response).await, b"hello world");
 
-    let response = host.send(range_request(&uri, "bytes=6-")).await;
+    let response = host
+        .send(range_request(&uri, "bytes=6-", &host.token))
+        .await;
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(response.headers()["content-range"], "bytes 6-10/11");
     assert_eq!(body_bytes(response).await, b"world");
 
-    let response = host.send(range_request(&uri, "bytes=-5")).await;
+    let response = host
+        .send(range_request(&uri, "bytes=-5", &host.token))
+        .await;
     assert_eq!(body_bytes(response).await, b"world");
 
-    let response = host.send(range_request(&uri, "bytes=50-")).await;
+    let response = host
+        .send(range_request(&uri, "bytes=50-", &host.token))
+        .await;
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(response.headers()["content-range"], "bytes */11");
 }
@@ -208,7 +232,10 @@ async fn large_file_streams_intact() {
 
     let file_id = host.id_of("/", "big.bin").await;
     let response = host
-        .send(get_request(&format!("/api/files/{file_id}/download")))
+        .send(authed_get(
+            &format!("/api/files/{file_id}/download"),
+            &host.token,
+        ))
         .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_bytes(response).await, five_mib);

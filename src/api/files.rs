@@ -9,6 +9,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
+use crate::auth::{AuthenticatedDevice, Permission};
 use crate::error::AppError;
 use crate::filesystem::browser::{self, DirListing, ListOptions, SortKey, SortOrder};
 use crate::filesystem::metadata::Entry;
@@ -43,12 +44,14 @@ pub struct BrowseQuery {
 }
 
 /// `GET /api/shares/{id}/files`
-// TODO(phase 4): require Browse permission for the calling device.
 pub async fn browse(
+    device: AuthenticatedDevice,
     State(state): State<AppState>,
     Path(share_id): Path<String>,
     Query(query): Query<BrowseQuery>,
 ) -> Result<Json<DirListing>, AppError> {
+    device.require(Permission::Browse)?;
+
     let share = state.share(&share_id).await?;
     let path = RelPath::parse(query.path.as_deref().unwrap_or("/"))?;
 
@@ -75,11 +78,13 @@ pub async fn browse(
 // ---------------------------------------------------------------------------
 
 /// `GET /api/files/{id}`
-// TODO(phase 4): require Browse permission.
 pub async fn metadata(
+    device: AuthenticatedDevice,
     State(state): State<AppState>,
     Path(file_id): Path<String>,
 ) -> Result<Json<Entry>, AppError> {
+    device.require(Permission::Browse)?;
+
     let (share, path) = look_up_file_id(&state, &file_id).await?;
     let entry = operations::stat(share, path).await?;
     Ok(Json(entry))
@@ -103,12 +108,14 @@ async fn look_up_file_id(state: &AppState, file_id: &str) -> Result<(Share, RelP
 /// how big the file is. Supports a single `Range` (for resuming). If the
 /// client disconnects, the response is dropped, which closes the file and
 /// stops reading.
-// TODO(phase 4): require Read permission.
 pub async fn download(
+    device: AuthenticatedDevice,
     State(state): State<AppState>,
     Path(file_id): Path<String>,
     request_headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    device.require(Permission::Read)?;
+
     let (share, path) = look_up_file_id(&state, &file_id).await?;
     let opened = operations::open_file(share, path).await?;
     let file_size = opened.size;

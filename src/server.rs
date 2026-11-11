@@ -1,19 +1,31 @@
-//! Starting the server and the middleware every request passes through.
+//! Starting the servers and the middleware every request passes through.
+//!
+//! Two listeners run side by side:
+//!
+//! - the **device API** over HTTPS on `config.bind` (all interfaces by
+//!   default, so LAN and VPN clients can reach it), and
+//! - the **admin API** over plain HTTP on `config.admin_bind`, which must
+//!   be a loopback address.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
+use axum_server::tls_rustls::RustlsConfig;
+use tokio_util::sync::CancellationToken;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::{Config, ConfigError};
-use crate::filesystem::roots::ShareError;
-use crate::state::AppState;
-use crate::{api, platform, storage};
+use crate::state::{AppState, StateError};
+use crate::{admin, api, platform, storage};
 
-/// The complete app: routes plus middleware. Used by `run` and by tests.
+/// How long open connections get to finish when shutting down.
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
+
+/// The device API: routes plus middleware. Used by `run` and by tests.
 pub fn app(state: AppState) -> Router {
     let config = state.config().clone();
     let request_timeout = Duration::from_secs(config.request_timeout_secs);
@@ -31,48 +43,89 @@ pub fn app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
 }
 
+/// The admin API with the same request limits. Used by `run` and by tests.
+pub fn admin_app(state: AppState) -> Router {
+    let max_body = state.config().max_request_body_bytes;
+
+    admin::router(state)
+        .layer(DefaultBodyLimit::max(max_body))
+        .layer(TraceLayer::new_for_http())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StartupError {
     #[error(transparent)]
     Config(#[from] ConfigError),
 
-    #[error("state: {0}")]
-    State(#[from] ShareError),
+    #[error(transparent)]
+    State(#[from] StateError),
 
-    #[error(
-        "refusing to bind non-loopback address {0}: \
-         device authentication and TLS are not implemented yet"
-    )]
-    NonLoopback(std::net::SocketAddr),
+    #[error("admin_bind must be a loopback address (e.g. 127.0.0.1:7879), not {0}")]
+    AdminNotLoopback(SocketAddr),
 
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// Load settings, start listening, and serve until Ctrl-C or SIGTERM.
+/// Load settings, start both listeners, and serve until Ctrl-C or SIGTERM.
 pub async fn run() -> Result<(), StartupError> {
+    // rustls needs to be told which crypto library to use, once per process.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let data_dir = platform::data_dir().ok_or(ConfigError::NoDataDir)?;
     storage::ensure_data_dir(&data_dir)?;
     let config = Config::load_or_init(&data_dir)?;
 
-    // There's no login or encryption yet (phase 4), so never accept
-    // connections from other machines.
-    if !config.bind.ip().is_loopback() {
-        return Err(StartupError::NonLoopback(config.bind));
+    if !config.admin_bind.ip().is_loopback() {
+        return Err(StartupError::AdminNotLoopback(config.admin_bind));
     }
 
     let state = AppState::load(config.clone(), data_dir.clone())?;
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let identity = state.identity();
+    let tls_config =
+        RustlsConfig::from_pem(identity.cert_pem.clone(), identity.key_pem.clone()).await?;
+
+    // One signal stops both listeners.
+    let shutdown = CancellationToken::new();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            wait_for_shutdown_signal().await;
+            shutdown.cancel();
+        }
+    });
+
+    let https_handle = axum_server::Handle::new();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        let https_handle = https_handle.clone();
+        async move {
+            shutdown.cancelled().await;
+            https_handle.graceful_shutdown(Some(SHUTDOWN_GRACE_PERIOD));
+        }
+    });
+
+    let admin_listener = tokio::net::TcpListener::bind(config.admin_bind).await?;
 
     tracing::info!(
-        addr = %listener.local_addr()?,
+        device_api = %format!("https://{}", config.bind),
+        admin_api = %format!("http://{}", admin_listener.local_addr()?),
+        certificate_pin = %identity.pin(),
         data_dir = %data_dir.display(),
         "RiftView listening"
     );
 
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(wait_for_shutdown_signal())
-        .await?;
+    let device_server = axum_server::bind_rustls(config.bind, tls_config)
+        .handle(https_handle)
+        .serve(app(state.clone()).into_make_service_with_connect_info::<SocketAddr>());
+
+    let admin_server = axum::serve(
+        admin_listener,
+        admin_app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown.cancelled_owned());
+
+    tokio::try_join!(device_server, async { admin_server.await })?;
 
     tracing::info!("shut down cleanly");
     Ok(())

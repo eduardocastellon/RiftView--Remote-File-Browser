@@ -9,7 +9,10 @@
 //! - [`storage`] saves small JSON settings files safely.
 //! - [`server`] wires everything together and starts listening.
 
+pub mod admin;
 pub mod api;
+pub mod auth;
+pub mod cli;
 pub mod config;
 pub mod error;
 pub mod filesystem;
@@ -17,3 +20,4 @@ pub mod platform;
 pub mod server;
 pub mod state;
 pub mod storage;
+pub mod tls;

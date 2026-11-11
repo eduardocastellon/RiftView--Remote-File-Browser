@@ -28,10 +28,16 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> std::io::Result<Option<T>>
 
 /// Replace the file at `path` with `value` encoded as JSON, atomically.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    let contents = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+    write_bytes_atomic(path, &contents)
+}
+
+/// Replace the file at `path` with `contents`, atomically. The file is
+/// readable only by the current user.
+pub fn write_bytes_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let folder = path
         .parent()
         .ok_or_else(|| std::io::Error::other("state file has no parent folder"))?;
-    let contents = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
 
     let file_name = path
         .file_name()
@@ -40,7 +46,7 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Resul
     let unique_suffix = uuid::Uuid::new_v4().simple();
     let temp_path = folder.join(format!(".{file_name}.{unique_suffix}.tmp"));
 
-    let result = write_then_rename(&temp_path, path, &contents);
+    let result = write_then_rename(&temp_path, path, contents);
 
     // If anything went wrong, don't leave the temp file lying around.
     if result.is_err() {
