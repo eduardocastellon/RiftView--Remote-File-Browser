@@ -6,6 +6,7 @@ import { router } from "expo-router";
 import { useState } from "react";
 import { Image, StyleSheet, Text, TouchableOpacity } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { font_size } from "../../../vars";
 
 export default function Index() {
   // Get list of saved devices
@@ -22,8 +23,8 @@ export default function Index() {
       ) : (
         <SafeAreaView style={styles.noDeviceContainer}>
           <Image source={require("../../../assets/icons/nodevicesfound.png")} style={styles.noDeviceImg}/>
-          <Text style={{fontSize: 16}}>It looks like you don't have any machines yet :/</Text>
-          <Text style={{fontSize: 16, marginTop: -15}}>Add one?</Text>
+          <Text style={{fontSize: font_size, textAlign: "center"}}>It looks like you don't have any machines yet :/</Text>
+          <Text style={{fontSize: font_size, marginTop: -15}}>Add one?</Text>
           <TouchableOpacity onPress={() => router.push("/addDevice")}>
             <Image source={require("../../../assets/icons/add.png")} style={styles.addDevice}/>
           </TouchableOpacity>

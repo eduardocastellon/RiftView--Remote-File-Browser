@@ -8,7 +8,7 @@ export default function RootLayout() {
         name="addDevice"
         options={{
           presentation: "formSheet",
-          sheetAllowedDetents: [0.5],
+          sheetAllowedDetents: "fitToContents",
           sheetGrabberVisible: true,
           title: "Connect to a machine",
           contentStyle: { backgroundColor: "white" },

@@ -1,4 +1,14 @@
-// Error messages
+// Globals
+const font_sizes = {
+    small: 14,
+    regular: 16,
+    large: 18,
+    xlarge: 20,
+}
+export const font_size: number = font_sizes.regular; 
+
+
+// Pairing values
 export const enum PairStatus {
     IDLE, // Not yet started searching or pairing
     SCANNING, // Actively searching/discovering the device on the network

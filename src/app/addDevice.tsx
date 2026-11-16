@@ -6,6 +6,7 @@ import { router } from "expo-router";
 import { useState } from "react";
 import { Image, StyleSheet, Text, TextInput, TouchableOpacity } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { font_size } from "../../vars";
 import { CodeInput } from "../components/code-input";
 
 export default function AddDevice(){
@@ -16,7 +17,7 @@ export default function AddDevice(){
         <SafeAreaProvider>
             {!deviceFound ? (
             <SafeAreaView style={styles.content}>
-                <Text>Enter the ip address of the host you want to connect to</Text>
+                <Text style={{ fontSize: font_size }}>Enter the ip address of the host you want to connect to</Text>
                 <TextInput
                     style={styles.input}
                     placeholderTextColor="#8E8E93"
@@ -26,7 +27,7 @@ export default function AddDevice(){
                     autoCorrect={false}
                 />
 
-                <Text>Name the device</Text>
+                <Text style={{ fontSize: font_size }}>Name the device</Text>
                 <TextInput
                     style={styles.input}
                     placeholderTextColor="#8E8E93"
@@ -41,13 +42,13 @@ export default function AddDevice(){
                 </TouchableOpacity>
 
                 <TouchableOpacity style={styles.help}>
-                    <Text>Need help? Click here</Text>
+                    <Text style={{ fontSize: font_size }}>Need help? Click here</Text>
                     <Image source={require("../../assets/icons/info.png")} style={styles.helpIcon} />
                 </TouchableOpacity>
             </SafeAreaView>
             ) : (
                 <SafeAreaView style={styles.authView}>
-                    <Text>Enter authentication code</Text>
+                    <Text style={{ fontSize: font_size }}>Enter authentication code</Text>
                     <CodeInput onChange={setAuthCode} />
 
                     <TouchableOpacity style={styles.button} onPress={() => router.back()}>
@@ -62,8 +63,11 @@ export default function AddDevice(){
 }
 
 const styles = StyleSheet.create({
+    // No flex: 1 here: the sheet uses "fitToContents", so it sizes itself
+    // to this content's natural height.
     content: {
-        flex: 1,
+        padding: 10,
+        paddingBottom: 24,
         flexDirection: "column",
         alignItems: "center",
         gap: 10,
@@ -99,6 +103,8 @@ const styles = StyleSheet.create({
         height: 16,
     },
     authView: {
+        padding: 10,
+        paddingBottom: 24,
         justifyContent: "center",
         alignItems: "center",
         gap: 16,
