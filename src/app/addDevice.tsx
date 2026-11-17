@@ -14,9 +14,14 @@ import { CodeInput } from "../components/code-input";
 
 type Step = "address" | "code" | "waiting" | "done";
 
-/** "192.168.1.20" or "192.168.1.20:7878" (IPv4 or hostname). */
+/**
+ * Accepts "192.168.1.20", "192.168.1.20:7878" or "https://192.168.1.20:7878"
+ * (IPv4 or hostname; an optional trailing "/" is ignored). The host only
+ * speaks HTTPS, so "https://" is the only scheme allowed.
+ */
 function parseAddress(input: string): { address: string; port: number } | null {
-    const match = input.trim().match(/^([^\s:/]+)(?::(\d{1,5}))?$/);
+    const withoutScheme = input.trim().replace(/^https:\/\//i, "").replace(/\/$/, "");
+    const match = withoutScheme.match(/^([^\s:/]+)(?::(\d{1,5}))?$/);
     if (!match) return null;
     const port = match[2] ? Number(match[2]) : DEFAULT_PORT;
     if (port < 1 || port > 65535) return null;
@@ -46,7 +51,11 @@ export default function AddDevice(){
     async function connect() {
         const parsed = parseAddress(addressInput);
         if (!parsed) {
-            setError("Enter an address like 192.168.1.20 (optionally with :port).");
+            setError(
+                /^http:\/\//i.test(addressInput.trim())
+                    ? "RiftView hosts use https://, not http://."
+                    : "Enter an address like 192.168.1.20 or https://192.168.1.20:7878.",
+            );
             return;
         }
         setError(null);
