@@ -5,10 +5,22 @@
 import { Host, Slider } from "@expo/ui";
 import { router } from "expo-router";
 import { useState } from "react";
-import { Linking, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
+import { Alert, Linking, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { buildNumber, privacyPolicyUrl, sourceCodeUrl, version } from "../../../strings";
 import { font_size } from "../../../vars";
+import { forgetAllHosts } from "../../api/devices";
+
+function confirmForgetAll() {
+    Alert.alert(
+        "Forget all connections?",
+        "Every paired host is removed from this phone, along with its key. You'll need new codes to pair again.",
+        [
+            { text: "Cancel", style: "cancel" },
+            { text: "Forget all", style: "destructive", onPress: () => void forgetAllHosts() },
+        ],
+    );
+}
 
 export default function Settings(){
     const [themeLight, setThemeLight] = useState<boolean>(true);
@@ -51,7 +63,7 @@ export default function Settings(){
                 <View style={styles.section}>
                     <Text style={styles.header}>Security & Privacy</Text>
                      <View style={styles.subText}>
-                        <Text style={{ fontSize: font_size }}>Forget all connections</Text><TouchableOpacity><Text style={{ fontSize: font_size }}>Clear</Text></TouchableOpacity>
+                        <Text style={{ fontSize: font_size }}>Forget all connections</Text><TouchableOpacity onPress={confirmForgetAll}><Text style={{ fontSize: font_size }}>Clear</Text></TouchableOpacity>
                     </View>
                     <View style={styles.subText}>
                         <Text style={{ fontSize: font_size }}>View connection history</Text><TouchableOpacity onPress={()=>router.push("/connectionHistory")}><Text style={{ fontSize: font_size }}>View</Text></TouchableOpacity>

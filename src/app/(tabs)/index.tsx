@@ -3,25 +3,38 @@
 // icon: /assets/icons/devices.png
 
 import DeviceEntry from "@/components/deviceEntry";
-import { router } from "expo-router";
-import { useState } from "react";
+import { router, useFocusEffect } from "expo-router";
+import { useCallback, useState } from "react";
+import { hostDisplayName, listHosts, type HostRecord } from "../../../data/hosts";
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { font_size } from "../../../vars";
 
 export default function Index() {
   // Get list of saved devices
-  const [deviceList, setDeviceList] = useState<any>(true);
+  const [deviceList, setDeviceList] = useState<HostRecord[]>([]);
+
+  // Reload whenever this tab comes back into view (e.g. after pairing).
+  useFocusEffect(
+    useCallback(() => {
+      listHosts().then(setDeviceList);
+    }, []),
+  );
 
   return (
     <SafeAreaProvider>
-      {deviceList ? (
+      {deviceList.length > 0 ? (
         // if there are devices, show
         <SafeAreaView style={styles.container}>
-          <ScrollView>
-            <DeviceEntry />
-
-
+          <ScrollView contentContainerStyle={styles.list}>
+            {deviceList.map((host) => (
+              <DeviceEntry
+                key={host.deviceId}
+                name={hostDisplayName(host)}
+                address={`${host.address}:${host.port}`}
+                onPress={() => router.push({ pathname: "/deviceSession", params: { deviceId: host.deviceId } })}
+              />
+            ))}
           </ScrollView>
         </SafeAreaView>
       ) : (
@@ -46,6 +59,9 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     padding: 20,
+  },
+  list: {
+    gap: 10,
   },
   noDeviceContainer: {
     flex: 1,

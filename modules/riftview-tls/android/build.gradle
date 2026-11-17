@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.riftviewtls'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.riftviewtls"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}
+
+dependencies {
+  // Same OkHttp version React Native ships (react-native/gradle/libs.versions.toml).
+  implementation 'com.squareup.okhttp3:okhttp:4.9.2'
+}

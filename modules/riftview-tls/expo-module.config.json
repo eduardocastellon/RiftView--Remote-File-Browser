@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["RiftviewTlsModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.riftviewtls.RiftviewTlsModule"]
+  }
+}

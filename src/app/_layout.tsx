@@ -1,3 +1,6 @@
+// Must load before anything uses crypto.getRandomValues (device keys, SPAKE2).
+import "react-native-get-random-values";
+
 import { Stack } from "expo-router";
 
 export default function RootLayout() {

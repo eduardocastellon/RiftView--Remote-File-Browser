@@ -8,7 +8,14 @@
     "scheme": "riftviewmobileclient",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "RiftView connects to your computer on the local network to browse and download your files.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "bundleIdentifier": "com.kunuhamuro.RiftViewMobileClient"
     },
     "android": {
       "adaptiveIcon": {
@@ -17,7 +24,8 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.kunuhamuro.RiftViewMobileClient"
     },
     "web": {
       "output": "server",
@@ -32,7 +40,11 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
-      ]
+      ],
+      "expo-secure-store",
+      "expo-sqlite",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

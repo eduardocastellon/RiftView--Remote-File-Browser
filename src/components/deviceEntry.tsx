@@ -1,13 +1,22 @@
-import { Image, StyleSheet, Text, TouchableOpacity } from "react-native";
+import { Image, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { font_size } from "../../vars";
 
-// this function will pass in props
-export default function DeviceEntry(){
+type Props = {
+    /** The host's display name: the user's alias, else the host's own name. */
+    name: string;
+    /** "address:port", shown under the name. */
+    address: string;
+    onPress?: () => void;
+};
+
+export default function DeviceEntry({ name, address, onPress }: Props){
     return(
-        <TouchableOpacity style={styles.container}>
+        <TouchableOpacity style={styles.container} onPress={onPress}>
             <Image source={require("@/assets/icons/devices.png")} style={styles.img}/>
-            {/* displays device's custom_alias | name */}
-            <Text style={styles.font}>Device</Text>
+            <View>
+                <Text style={styles.font}>{name}</Text>
+                <Text style={styles.address}>{address}</Text>
+            </View>
         </TouchableOpacity>
     );
 };
@@ -24,6 +33,9 @@ const styles = StyleSheet.create({
     },
     font:{
         fontSize: font_size,
+    },
+    address: {
+        color: "#6C6C70",
     },
     img: {
         width: 40,
