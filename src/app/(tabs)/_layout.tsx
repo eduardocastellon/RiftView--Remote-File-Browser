@@ -8,7 +8,7 @@ import {
 } from "react-native";
 
 // Open on the center "Devices" tab even though Settings is listed first.
-export const unstable_settings = { initialRouteName: "index" };
+export const unstable_settings = { anchor: "index" };
 
 function TabIcon({ source, color }: { source: ImageSourcePropType; color: ColorValue }) {
   return <Image source={source} style={{ width: 24, height: 24, tintColor: color }} />;
@@ -19,6 +19,8 @@ export default function TabLayout() {
 
   return (
     <Tabs
+      // Back from Settings returns to the anchor tab (Devices), not the first tab.
+      backBehavior="initialRoute"
       screenOptions={{
         tabBarActiveTintColor: "#007AFF",
         // Full-width push between tabs, direction based on tab order.

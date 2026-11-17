@@ -1,0 +1,14 @@
+//devices will be saved like this:
+
+devices: // table of general device info
+    id: string, primary key, // eg. "dev_3f2a...", also the ID the app uses to log in
+    name: string, // name the device gave itself at pairing, eg. "Lalo's iPhone"
+    custom_alias: string | null, // custom name the host gave the device (shown instead of name)
+    public_key: string, // Ed25519 public key (base64), cryptographic id to authenticate device
+    key_version: int, // identifies device credential/key version, starts at 1
+    device_type: string, // phone, tablet, laptop, desktop, other
+    platform: string, // ios, android, macos, windows, linux, other
+    app_version: string, // eg. "1.4.0", sent at pairing, updated at each login
+    paired_at_ms: int, // when device initially paired for the first time
+    last_connected_at_ms: int | null, // last successful login
+    revoked_at_ms: int | null // null = trusted device, set = revoked forever (row kept as a record)

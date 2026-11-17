@@ -18,6 +18,10 @@ export default function RootLayout() {
         name="connectionHistory"
         options={{ title: "Connection History", headerBackButtonDisplayMode: "minimal" }}
       />
+      <Stack.Screen
+        name="deviceSession"
+        options={{ title: "Session", headerBackButtonDisplayMode: "minimal" }}
+      />
     </Stack>
   );
 }

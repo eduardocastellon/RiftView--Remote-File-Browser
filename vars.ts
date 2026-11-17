@@ -22,3 +22,4 @@ export const enum PairStatus {
     RECONNECTING, // Automatically trying to re-establish a lost connection
     BUSY, // Device is busy or already paired with another host
 }
+

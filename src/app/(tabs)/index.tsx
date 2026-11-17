@@ -2,25 +2,30 @@
 // aligned: center
 // icon: /assets/icons/devices.png
 
+import DeviceEntry from "@/components/deviceEntry";
 import { router } from "expo-router";
 import { useState } from "react";
-import { Image, StyleSheet, Text, TouchableOpacity } from "react-native";
+import { Image, ScrollView, StyleSheet, Text, TouchableOpacity } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { font_size } from "../../../vars";
 
 export default function Index() {
   // Get list of saved devices
-  const [deviceList, setDeviceList] = useState<any>(false);
+  const [deviceList, setDeviceList] = useState<any>(true);
 
   return (
     <SafeAreaProvider>
       {deviceList ? (
+        // if there are devices, show
         <SafeAreaView style={styles.container}>
-          <Text>Home page</Text>
+          <ScrollView>
+            <DeviceEntry />
 
-        
+
+          </ScrollView>
         </SafeAreaView>
       ) : (
+        // if no devices, show
         <SafeAreaView style={styles.noDeviceContainer}>
           <Image source={require("../../../assets/icons/nodevicesfound.png")} style={styles.noDeviceImg}/>
           <Text style={{fontSize: font_size, textAlign: "center"}}>It looks like you don't have any machines yet :/</Text>
@@ -36,11 +41,11 @@ export default function Index() {
 }
 
 const styles = StyleSheet.create({
+  // No alignItems: "center" here — that would shrink the ScrollView (and the
+  // device rows inside it) to the width of their content.
   container: {
     flex: 1,
     padding: 20,
-    alignItems: "center",
-    justifyContent: "center",
   },
   noDeviceContainer: {
     flex: 1,
