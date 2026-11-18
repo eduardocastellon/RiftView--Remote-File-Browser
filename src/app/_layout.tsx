@@ -26,9 +26,11 @@ export default function RootLayout() {
         options={{ title: "Connection History", headerBackButtonDisplayMode: "minimal" }}
       />
       <Stack.Screen
-        name="[id]"
-        // Title is set by the screen (host, share or folder name).
-        options={{ title: "", headerBackButtonDisplayMode: "minimal" }}
+        name="session"
+        // The session has its own stack and headers (session/_layout.tsx).
+        // No swipe back to the device list (leave via the bar's Exit); swiping
+        // between folders inside the session still works.
+        options={{ headerShown: false, gestureEnabled: false }}
       />
     </Stack>
     </AppLockProvider>

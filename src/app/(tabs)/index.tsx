@@ -33,7 +33,7 @@ export default function Index() {
                 key={host.deviceId}
                 name={hostDisplayName(host)}
                 address={`${host.address}:${host.port}`}
-                onPress={() => router.push({ pathname: "/[id]", params: { id: host.deviceId } })}
+                onPress={() => router.push({ pathname: "/session", params: { id: host.deviceId } })}
               />
             ))}
           </ScrollView>

@@ -1,25 +1,29 @@
 // File browser for a paired host (client_reqs.md §9).
 //
-// Route: /[id]?share=<shareId>&path=<folder path>&title=<header title>
+// Route: /session?id=<deviceId>&share=<shareId>&path=<folder path>&title=<header title>
 //  - id:    the host's deviceId (which saved host to talk to)
 //  - share: missing → this screen lists the host's shares
 //  - path:  folder inside the share, default "/"
 //  - title: header title (share or folder name), so it shows before loading
 //
-// Opening a folder pushes this same route with new params, so the back
-// button / swipe goes up one folder, and each level keeps its own scroll
-// position and data.
+// Opening a folder pushes this same route with new params onto the session's
+// own stack (session/_layout.tsx), so the back button / swipe goes up one
+// folder and each level keeps its own scroll position and data. Each screen
+// reports itself to the session history on focus, for the bottom bar's
+// back / forward buttons.
 
-import { router, useLocalSearchParams, useNavigation } from "expo-router";
+import { router, useFocusEffect, useLocalSearchParams, useNavigation } from "expo-router";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { hostDisplayName, type HostRecord } from "../../data/hosts";
-import { DeviceRemovedError } from "../api/auth";
-import { ApiError, ConnectionError } from "../api/client";
-import { forgetHost, getHost, getMe } from "../api/devices";
-import { listFolder, listShares, PAGE_SIZE, type FileEntry as Entry, type Share } from "../api/files";
-import FileEntry, { formatBytes, formatDate } from "../components/fileEntry";
-import { useFontSize } from "../hooks/font-size";
+import { hostDisplayName, type HostRecord } from "../../../data/hosts";
+import { DeviceRemovedError } from "../../api/auth";
+import { ApiError, ConnectionError } from "../../api/client";
+import { forgetHost, getHost, getMe } from "../../api/devices";
+import { listFolder, listShares, PAGE_SIZE, type FileEntry as Entry, type Share } from "../../api/files";
+import { useBrowseBarInset } from "../../components/browseBar";
+import FileEntry, { formatBytes, formatDate } from "../../components/fileEntry";
+import { useFontSize } from "../../hooks/font-size";
+import { useSessionHistory } from "../../hooks/session-history";
 
 type Params = { id: string; share?: string; path?: string; title?: string };
 
@@ -49,6 +53,8 @@ export default function FileBrowser() {
     const { id, share, path = "/", title } = useLocalSearchParams<Params>();
     const navigation = useNavigation();
     const font_size = useFontSize();
+    const { visit, current, searchQuery } = useSessionHistory();
+    const barInset = useBrowseBarInset();
 
     const [host, setHost] = useState<HostRecord | null>(null);
     const [rows, setRows] = useState<Row[]>([]);
@@ -63,12 +69,27 @@ export default function FileBrowser() {
 
     const isShareList = !share;
 
+    // The bottom bar's search filters this folder by name, but only while this
+    // is the folder being searched (screens behind it in the stack are unaffected).
+    const isCurrent = !!current && (current.share ?? "") === (share ?? "") && (!share || (current.path ?? "/") === path);
+    const query = isCurrent ? searchQuery.trim().toLowerCase() : "";
+    const visibleRows = query
+        ? rows.filter((row) => (row.kind === "share" ? row.share.name : row.entry.name).toLowerCase().includes(query))
+        : rows;
+
     useLayoutEffect(() => {
         navigation.setOptions({
             title: title ?? (host ? hostDisplayName(host) : ""),
         });
-        // console.log(id);
     }, [navigation, title, host]);
+
+    // Tell the session history where we are whenever this screen is shown
+    // (opened, or returned to by back / swipe / Home).
+    useFocusEffect(
+        useCallback(() => {
+            visit({ share, path: share ? path : undefined, title });
+        }, [visit, share, path, title]),
+    );
 
     /** Fetches the shares (top level) or the first page of the folder. */
     const fetchFirstPage = useCallback(async (): Promise<{ record: HostRecord; rows: Row[]; total: number }> => {
@@ -136,12 +157,12 @@ export default function FileBrowser() {
     }
 
     function openShare(s: Share) {
-        router.push({ pathname: "/[id]", params: { id, share: s.id, path: "/", title: s.name } });
+        router.push({ pathname: "/session", params: { id, share: s.id, path: "/", title: s.name } });
     }
 
     function openEntry(entry: Entry) {
         if (entry.type === "directory") {
-            router.push({ pathname: "/[id]", params: { id, share: share!, path: entry.path, title: entry.name } });
+            router.push({ pathname: "/session", params: { id, share: share!, path: entry.path, title: entry.name } });
             return;
         }
         // Downloading needs streaming support in the native module (§9 "Download").
@@ -214,7 +235,7 @@ export default function FileBrowser() {
     return (
         <FlatList
             style={styles.list}
-            data={rows}
+            data={visibleRows}
             keyExtractor={(row) => (row.kind === "share" ? row.share.id : row.entry.id)}
             renderItem={({ item }) =>
                 item.kind === "share" ? (
@@ -233,7 +254,9 @@ export default function FileBrowser() {
             ListHeaderComponent={header}
             ListEmptyComponent={
                 <Text style={[styles.empty, { fontSize: font_size }]}>
-                    {isShareList ? "This host isn't sharing any folders yet." : "This folder is empty."}
+                    {query
+                        ? `Nothing here matches “${searchQuery.trim()}”.`
+                        : isShareList ? "This host isn't sharing any folders yet." : "This folder is empty."}
                 </Text>
             }
             ListFooterComponent={
@@ -241,7 +264,11 @@ export default function FileBrowser() {
                     {loadingMore && <ActivityIndicator />}
                     {error && <Text style={[styles.error, { fontSize: font_size }]}>{error.message}</Text>}
                     {!isShareList && rows.length > 0 && (
-                        <Text style={styles.count}>{total} {total === 1 ? "item" : "items"}</Text>
+                        <Text style={styles.count}>
+                            {query
+                                ? `${visibleRows.length} of ${total} ${total === 1 ? "item" : "items"} match`
+                                : `${total} ${total === 1 ? "item" : "items"}`}
+                        </Text>
                     )}
                     {forgetButton}
                 </View>
@@ -250,6 +277,12 @@ export default function FileBrowser() {
             onEndReachedThreshold={0.5}
             refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
             contentInsetAdjustmentBehavior="automatic"
+            // Searching: tap a result without first dismissing the keyboard,
+            // and scrolling the list hides the keyboard.
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            // Room to scroll the last rows above the floating bottom bar.
+            contentContainerStyle={{ paddingBottom: barInset }}
         />
     );
 }
