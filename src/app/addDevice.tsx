@@ -7,10 +7,11 @@ import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Image, StyleSheet, Text, TextInput, TouchableOpacity } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { hostDisplayName } from "../../data/hosts";
-import { font_size, PairStatus } from "../../vars";
+import { PairStatus } from "../../vars";
 import { DEFAULT_PORT } from "../api/paths";
 import { PairingError, pairWithHost, probeHost } from "../api/pairing";
 import { CodeInput } from "../components/code-input";
+import { useFontSize } from "../hooks/font-size";
 
 type Step = "address" | "code" | "waiting" | "done";
 
@@ -29,6 +30,7 @@ function parseAddress(input: string): { address: string; port: number } | null {
 }
 
 export default function AddDevice(){
+    const font_size = useFontSize();
     const [step, setStep] = useState<Step>("address");
     const [status, setStatus] = useState<PairStatus>(PairStatus.IDLE);
     const [error, setError] = useState<string | null>(null);
@@ -187,7 +189,7 @@ export default function AddDevice(){
                     <ActivityIndicator />
                     <Text style={{ fontSize: font_size, textAlign: "center" }}>Approve this phone on the host</Text>
                     <Text style={styles.hint}>Check that the host shows the same fingerprint:</Text>
-                    <Text style={styles.fingerprint}>{fingerprint}</Text>
+                    <Text style={[styles.fingerprint, { fontSize: font_size }]}>{fingerprint}</Text>
                     <TouchableOpacity style={styles.button} onPress={cancelPairing}>
                         <Text style={styles.buttonText}>Cancel</Text>
                     </TouchableOpacity>
@@ -263,7 +265,6 @@ const styles = StyleSheet.create({
         paddingHorizontal: 20,
     },
     fingerprint: {
-        fontSize: font_size,
         fontFamily: "Menlo",
         fontWeight: "600",
     },

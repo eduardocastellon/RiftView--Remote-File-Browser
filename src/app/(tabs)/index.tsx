@@ -5,12 +5,13 @@
 import DeviceEntry from "@/components/deviceEntry";
 import { router, useFocusEffect } from "expo-router";
 import { useCallback, useState } from "react";
-import { hostDisplayName, listHosts, type HostRecord } from "../../../data/hosts";
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { font_size } from "../../../vars";
+import { hostDisplayName, listHosts, type HostRecord } from "../../../data/hosts";
+import { useFontSize } from "../../hooks/font-size";
 
 export default function Index() {
+  const font_size = useFontSize();
   // Get list of saved devices
   const [deviceList, setDeviceList] = useState<HostRecord[]>([]);
 
@@ -32,7 +33,7 @@ export default function Index() {
                 key={host.deviceId}
                 name={hostDisplayName(host)}
                 address={`${host.address}:${host.port}`}
-                onPress={() => router.push({ pathname: "/deviceSession", params: { deviceId: host.deviceId } })}
+                onPress={() => router.push({ pathname: "/[id]", params: { id: host.deviceId } })}
               />
             ))}
           </ScrollView>

@@ -2,9 +2,13 @@
 import "react-native-get-random-values";
 
 import { Stack } from "expo-router";
+import { AppLockProvider } from "../hooks/app-lock";
+import { FontSizeProvider } from "../hooks/font-size";
 
 export default function RootLayout() {
   return (
+    <FontSizeProvider>
+    <AppLockProvider>
     <Stack>
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
       <Stack.Screen
@@ -22,9 +26,12 @@ export default function RootLayout() {
         options={{ title: "Connection History", headerBackButtonDisplayMode: "minimal" }}
       />
       <Stack.Screen
-        name="deviceSession"
-        options={{ title: "Session", headerBackButtonDisplayMode: "minimal" }}
+        name="[id]"
+        // Title is set by the screen (host, share or folder name).
+        options={{ title: "", headerBackButtonDisplayMode: "minimal" }}
       />
     </Stack>
+    </AppLockProvider>
+    </FontSizeProvider>
   );
 }

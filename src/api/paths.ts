@@ -21,3 +21,7 @@ export const authSessionPath = "/api/auth/session";
 export const devicesMePath = "/api/devices/me";
 export const hostInfoPath = "/api/host";
 export const sharesPath = "/api/shares";
+export const sharePath = (shareId: string) => `${sharesPath}/${encodeURIComponent(shareId)}`;
+export const shareFilesPath = (shareId: string) => `${sharePath(shareId)}/files`;
+export const filePath = (fileId: string) => `/api/files/${encodeURIComponent(fileId)}`;
+export const fileDownloadPath = (fileId: string) => `${filePath(fileId)}/download`;

@@ -8,8 +8,10 @@ import { useState } from "react";
 import { Alert, Linking, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { buildNumber, privacyPolicyUrl, sourceCodeUrl, version } from "../../../strings";
-import { font_size } from "../../../vars";
+import { font_size_levels } from "../../../vars";
 import { forgetAllHosts } from "../../api/devices";
+import { useAppLock } from "../../hooks/app-lock";
+import { useFontSize, useFontSizeSetting } from "../../hooks/font-size";
 
 function confirmForgetAll() {
     Alert.alert(
@@ -24,12 +26,27 @@ function confirmForgetAll() {
 
 export default function Settings(){
     const [themeLight, setThemeLight] = useState<boolean>(true);
-    const [requireFaceID, setRequireFaceID] = useState<boolean>(false);
-    // UI only for now: moves the slider but isn't wired to the text size yet.
+    // App lock: Face ID / Touch ID / fingerprint, else the device passcode.
+    const appLock = useAppLock();
+    const [lockBusy, setLockBusy] = useState(false);
+    async function toggleAppLock(next: boolean) {
+        setLockBusy(true);
+        const error = await appLock.setEnabled(next);
+        setLockBusy(false);
+        if (error) Alert.alert("Couldn't change app lock", error);
+    }
+    // "Face ID" / "Touch ID" / "Fingerprint" / "Passcode"
+    const lockLabel = appLock.method.label.charAt(0).toUpperCase() + appLock.method.label.slice(1);
     // Snaps to 4 positions (0-3), matching small / regular / large / xlarge
-    // in vars.ts. Starts on 1 (regular).
-    const [textSize, setTextSize] = useState<number>(1);
+    // in vars.ts. Changing it resizes text across the app and is saved.
+    const font_size = useFontSize();
+    const { level, setLevel } = useFontSizeSetting();
+    const textSize = font_size_levels.indexOf(level);
     const textSizeDisplay: string = textSize === 0 ? "small" : textSize === 1 ? "regular" : textSize === 2 ? "large" : textSize === 3 ? "extra large" : "Error";
+    function onTextSizeChange(value: number) {
+        const next = font_size_levels[Math.round(value)];
+        if (next && next !== level) setLevel(next);
+    }
 
     return(
         <SafeAreaProvider>
@@ -37,14 +54,14 @@ export default function Settings(){
                 <ScrollView contentContainerStyle={styles.content}>
                 {/* appearance */}
                 <View style={styles.section}>
-                    <Text style={styles.header}>Appearance</Text>
+                    <Text style={[styles.header, { fontSize: font_size }]}>Appearance</Text>
                     <View style={styles.subText}>
                         <Text style={{ fontSize: font_size }}>Text Size:</Text>
                         <Text style={{ fontSize: font_size }}>{textSizeDisplay}</Text>
                     </View>
                     
                     <Host matchContents={{ vertical: true }} style={styles.slider}>
-                        <Slider value={textSize} onValueChange={setTextSize} min={0} max={3} step={1} />
+                        <Slider value={textSize} onValueChange={onTextSizeChange} min={0} max={3} step={1} />
                     </Host>
 
                     <View style={styles.subText}>
@@ -61,28 +78,39 @@ export default function Settings(){
 
                 {/* security & privacy */}
                 <View style={styles.section}>
-                    <Text style={styles.header}>Security & Privacy</Text>
+                    <Text style={[styles.header, { fontSize: font_size }]}>Security & Privacy</Text>
                      <View style={styles.subText}>
                         <Text style={{ fontSize: font_size }}>Forget all connections</Text><TouchableOpacity onPress={confirmForgetAll}><Text style={{ fontSize: font_size }}>Clear</Text></TouchableOpacity>
                     </View>
                     <View style={styles.subText}>
                         <Text style={{ fontSize: font_size }}>View connection history</Text><TouchableOpacity onPress={()=>router.push("/connectionHistory")}><Text style={{ fontSize: font_size }}>View</Text></TouchableOpacity>
                     </View>
-                    <View style={styles.subText}>
-                        <Text style={{ fontSize: font_size }}>Require Face ID</Text>
-                        <Switch
-                            trackColor={{ false: '#767577', true: '#81b0ff' }}
-                            thumbColor={requireFaceID ? '#007AFF' : '#f4f3f4'}
-                            ios_backgroundColor="#3e3e3e"
-                            onValueChange={()=>setRequireFaceID(!requireFaceID)}
-                            value={requireFaceID}
-                        />
-                    </View>
+
+                    {/* Offers Face ID / Touch ID / fingerprint if set up on the phone,
+                        else the device passcode. Phones with no lock can't use it. */}
+                    {appLock.method.kind !== "none" ? (
+                        <View style={styles.subText}>
+                            <Text style={{ fontSize: font_size }}>Require {lockLabel}</Text>
+                            <Switch
+                                trackColor={{ false: '#767577', true: '#81b0ff' }}
+                                thumbColor={appLock.enabled ? '#007AFF' : '#f4f3f4'}
+                                ios_backgroundColor="#3e3e3e"
+                                onValueChange={toggleAppLock}
+                                value={appLock.enabled}
+                                disabled={lockBusy}
+                            />
+                        </View>
+                    ) : (
+                        <Text style={[styles.note, { fontSize: font_size - 2 }]}>
+                            Set up Face ID, a fingerprint or a passcode on this phone to lock RiftView.
+                        </Text>
+                    )}
+
                 </View>
 
                 {/* about */}
                 <View style={styles.section}>
-                    <Text style={styles.header}>About</Text>
+                    <Text style={[styles.header, { fontSize: font_size }]}>About</Text>
                     <View style={styles.subText}>
                         <Text style={{ fontSize: font_size}}>Version</Text><Text style={{ fontSize: font_size }}>{version}</Text>
                     </View>
@@ -120,10 +148,12 @@ const styles = StyleSheet.create({
     },
     header: {
         fontWeight: "bold",
-        fontSize: font_size,
     },
     slider: {
         width: "100%",
+    },
+    note: {
+        color: "#6C6C70",
     },
     subText: {
         flexDirection: "row",
