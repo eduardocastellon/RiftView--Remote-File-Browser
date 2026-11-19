@@ -3,6 +3,7 @@
 //! Devices can't do this: a device that could register any folder would
 //! effectively have access to the whole disk.
 
+use crate::transfers::cleanup;
 use std::path::PathBuf;
 
 use axum::Json;
@@ -112,6 +113,12 @@ pub async fn remove(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
+    state.share(&id).await?; // 404 before touching anything.
+
+    // Delete unfinished uploads' partial files while we still manage the
+    // folder; otherwise they'd be left behind.
+    cleanup::discard_uploads_in_share(&state, &id).await?;
+
     state.shares().write().await.remove(&id)?;
     tracing::info!(share_id = %id, "share removed");
 

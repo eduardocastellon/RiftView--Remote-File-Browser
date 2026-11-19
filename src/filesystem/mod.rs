@@ -1,6 +1,7 @@
 //! Reading files and folders inside shares, without ever escaping them.
 //!
-//! This module knows nothing about HTTP.
+//! This module knows nothing about HTTP. Reading lives in [`browser`] and
+//! [`operations`]; writing uploads lives in [`writing`].
 //!
 //! ## How we stay inside a share
 //!
@@ -21,6 +22,7 @@ pub mod metadata;
 pub mod operations;
 pub mod resolver;
 pub mod roots;
+pub mod writing;
 
 pub use ids::FileId;
 pub use resolver::RelPath;
@@ -61,6 +63,10 @@ pub enum FsError {
     /// or the request timed out), so the work was stopped early.
     #[error("stopped: request was abandoned")]
     Abandoned,
+
+    /// Every name from `name.ext` to `name (999).ext` is taken.
+    #[error("no free file name")]
+    NoFreeName,
 }
 
 impl From<std::io::Error> for FsError {

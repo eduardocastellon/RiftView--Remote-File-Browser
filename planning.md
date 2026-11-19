@@ -14,7 +14,7 @@
 
 ---
 
-> **Status (2026-11-19):** Phases 1–5 are built. Phases 6–9 are not started. Each section below says what is built, what is planned, and where the build deliberately differs from the original plan.
+> **Status (2026-11-19):** Phases 1–6 are built. Phases 7–9 are not started. Each section below says what is built, what is planned, and where the build deliberately differs from the original plan.
 
 # 1. Backend Overview
 
@@ -193,16 +193,17 @@ Built:
 
 Planned (Phase 7): file creation, rename and move, deletion, directory creation.
 
-### Transfer Module (`transfers/`), downloads built
+### Transfer Module (`transfers/`), built
 
 Built:
 - File streaming in bounded chunks.
 - File versions (`ETag`) and resume safety.
 - Integrity verification (SHA-256 + in-memory cache).
-- Concurrent download limits.
+- Concurrent transfer limits (downloads, hashes and upload chunks share them).
 - Transfer cancellation (download stops when the device disconnects).
+- Uploads: initialization, chunk tracking in SQLite, progress, resumability, cleanup of cancelled/expired/failed uploads (`uploads.rs`, `cleanup.rs`).
 
-Planned (Phase 6): transfer initialization, chunk management, upload progress, resumable uploads, temporary file management.
+Writing the partial and final files lives in `filesystem/writing.rs`, so it stays confined by `cap-std` like all other file access.
 
 ### Database Module (`database/`), built (not in the original plan)
 
@@ -273,6 +274,7 @@ riftview-api/
 |   |   ├── metadata.rs
 |   |   ├── ids.rs         opaque file IDs
 |   |   ├── operations.rs
+|   |   ├── writing.rs     upload partial files, free space, finishing
 |   |   └── roots.rs       shares (SQLite)
 |   |
 |   ├── transfers/
@@ -280,13 +282,15 @@ riftview-api/
 |   |   ├── stream.rs      streaming download body
 |   |   ├── version.rs     file versions / ETags
 |   |   ├── hashing.rs     SHA-256 + cache
-|   |   ├── limits.rs      concurrent download limits
-|   |   └── upload.rs, chunks.rs, persistence.rs   (planned, Phase 6)
+|   |   ├── limits.rs      concurrent transfer limits
+|   |   ├── uploads.rs     unfinished uploads and chunks (SQLite)
+|   |   └── cleanup.rs     cancelled / expired / failed uploads
 |   |
 |   ├── database/
 |   |   ├── mod.rs         connection, pragmas, migrations
 |   |   └── migrations/
-|   |       └── 001_devices_and_shares.sql
+|   |       ├── 001_devices_and_shares.sql
+|   |       └── 002_uploads.sql
 |   |
 |   ├── storage/           atomic writes for config, admin token, certificate
 |   |   └── mod.rs
@@ -301,7 +305,8 @@ riftview-api/
 |   ├── common/mod.rs      reference client used by the tests
 |   ├── api_tests.rs
 |   ├── auth_tests.rs
-|   └── security_tests.rs
+|   ├── security_tests.rs
+|   └── upload_tests.rs
 |
 └── docs/
     └── auth-protocol.md
@@ -374,16 +379,17 @@ File identifiers are an opaque base64url encoding of (share ID, relative path). 
 
 ## 5.5 Transfers (uploads)
 
-Planned, Phase 6.
+All need the `upload` permission; starting, sending chunks and finishing also need a writable share. A device only sees its own uploads (others are `404`).
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/transfers` | Initialize transfer |
-| GET | `/api/transfers/{id}` | Retrieve transfer status |
-| PUT | `/api/transfers/{id}/chunks/{index}` | Upload chunk |
-| GET | `/api/transfers/{id}/chunks/{index}` | Retrieve chunk |
-| POST | `/api/transfers/{id}/complete` | Finalize transfer |
-| DELETE | `/api/transfers/{id}` | Cancel transfer |
+| Method | Endpoint | Purpose | Status |
+|---|---|---|---|
+| POST | `/api/transfers` | Initialize transfer: share, folder, name, size, whole-file SHA-256 | Built |
+| GET | `/api/transfers` | This device's unfinished uploads | Built (not in the original plan) |
+| GET | `/api/transfers/{id}` | Transfer status, including missing chunk indexes | Built |
+| PUT | `/api/transfers/{id}/chunks/{index}` | Upload chunk, with `X-Chunk-SHA256` | Built |
+| GET | `/api/transfers/{id}/chunks/{index}` | Retrieve chunk | **Not built** (chunks are hash-checked on arrival, so reading them back isn't needed) |
+| POST | `/api/transfers/{id}/complete` | Finalize transfer | Built |
+| DELETE | `/api/transfers/{id}` | Cancel transfer | Built |
 
 ## 5.6 Admin API (host only)
 
@@ -393,7 +399,7 @@ Built. Listens on `127.0.0.1:7879` (must be loopback) and needs `Authorization: 
 |---|---|---|---|
 | GET | `/admin/host` | Host info and certificate pin | `info` |
 | GET, POST | `/admin/shares` | List / add shares | `share list`, `share add` |
-| GET, PATCH, DELETE | `/admin/shares/{id}` | Show / rename or toggle writable / remove | `share remove` (no CLI for PATCH yet) |
+| GET, PATCH, DELETE | `/admin/shares/{id}` | Show / rename or toggle writable / remove | `share rename`, `share set-writable`, `share remove` |
 | GET | `/admin/devices` | List devices | `devices` |
 | PATCH | `/admin/devices/{id}` | Set permissions or alias | `rename` |
 | DELETE | `/admin/devices/{id}` | Revoke | `revoke` |
@@ -606,7 +612,7 @@ A successfully authenticated device must not automatically have unrestricted acc
 |---|---|---|
 | Browse | List shares and folders, see file details | Built, enforced |
 | Read | Download files and get their SHA-256 | Built, enforced |
-| Upload | Create new files and folders | Stored and checked; endpoints planned (Phases 6–7) |
+| Upload | Create new files (and folders, Phase 7) | Built for uploads (needs a writable share); folder creation planned (Phase 7) |
 | Rename | Rename files | Stored and checked; endpoints planned (Phase 7) |
 | Move | Move files | Stored and checked; endpoints planned (Phase 7) |
 | Delete | Delete files | Stored and checked; endpoints planned (Phase 7) |
@@ -678,6 +684,29 @@ An upload should follow this sequence:
 
 Do not expose partially uploaded files as completed files.
 
+**As built** (`api/transfers.rs`, `transfers/uploads.rs`, `filesystem/writing.rs`):
+1. **Start:**
+   - Checks the `upload` permission, that the share is writable, and that the target folder exists (it isn't created).
+   - Checks the name: no `/` or `..`, and not the reserved partial-file pattern.
+   - Checks the size against `max_upload_bytes` (10 GiB default) → `413`.
+   - Checks free space ≥ size + other unfinished uploads into that share + 1 GiB → `507`.
+   - Checks the open-upload limits: 4 per device, 32 total → `429`.
+2. A row goes into `uploads` (SQLite), and an empty partial file is created at full size in the target folder: `.riftview-upload-<id>.part`. It's on the same disk, so finishing is a rename.
+3. **Chunks** (`PUT …/chunks/{index}`):
+   - Index and exact length are checked.
+   - The body's SHA-256 must match `X-Chunk-SHA256`, otherwise `422 checksum_mismatch`, and the device resends.
+   - A good chunk is written at its offset and recorded in `upload_chunks`.
+   - Resending a received chunk is harmless and isn't rewritten.
+   - Each chunk holds a transfer slot (shared with downloads) and has its own 5-minute timeout.
+4. **Complete:**
+   - Needs every chunk (`409` otherwise).
+   - The whole partial file is hashed and compared with the SHA-256 from the start. A mismatch discards the upload → `422`.
+   - The data is flushed to disk, then the file is moved into place with a **hard link** to the wanted name, which can never replace an existing file. If the name is taken, it tries `name (1).ext`, `name (2).ext`… On disks without hard links (e.g. exFAT), it falls back to check-then-rename.
+   - The partial file and rows are removed.
+   - Only one finish (or cancel) can run per upload at a time. Chunks are refused while it does.
+5. **Hidden while partial:** partial files are skipped in listings and can't be opened via the API, even with a forged file ID.
+6. **Cleanup:** cancel, a failed final check, a share being removed, or **24 h with no new chunk** (swept at startup and every 10 minutes) deletes the partial file and rows.
+
 ## 8.4 Chunking
 
 Initial recommended chunk size: 4 MiB.
@@ -704,6 +733,12 @@ The backend should maintain a transfer manifest containing:
 
 The client should be able to request the status of a transfer and retransmit missing chunks.
 
+**As built:**
+- The manifest is the `uploads` row plus its `upload_chunks` rows (see `data_planning.md`): ID, device, share, target folder, name, size, chunk size, final SHA-256, created and last-activity times.
+- Per-chunk hashes are checked on arrival rather than stored.
+- Expiration is last activity + `upload_expiry_secs`.
+- Status responses list `missing_chunks`, so the client resends exactly those.
+
 ## 8.5 Integrity Verification
 
 Use SHA-256 or another established cryptographic hash.
@@ -715,7 +750,9 @@ Verify:
 
 For downloads, account for the possibility that the source file changes during a transfer. Use a stable file handle and a clearly defined source-consistency strategy.
 
-**As built (downloads):** `GET /api/files/{id}/hash` returns the SHA-256 of the whole file, plus its size and ETag. Hashing streams the file with a 1 MiB buffer and stops if the request is abandoned. It is exempt from the request timeout. Results are cached in memory (up to 10,000, least recently used evicted) until the file's version changes. If the file changes during hashing, the request returns `409`. The download stream and ETag above are the source-consistency strategy. Per-chunk upload verification is planned with Phase 6.
+**As built (downloads):** `GET /api/files/{id}/hash` returns the SHA-256 of the whole file, plus its size and ETag. Hashing streams the file with a 1 MiB buffer and stops if the request is abandoned. It is exempt from the request timeout. Results are cached in memory (up to 10,000, least recently used evicted) until the file's version changes. If the file changes during hashing, the request returns `409`. The download stream and ETag above are the source-consistency strategy.
+
+**As built (uploads):** every chunk is checked against its `X-Chunk-SHA256` before it is written, and the whole file against the SHA-256 given at the start before it becomes a real file. The size is fixed at the start and every chunk's length is checked. Finishing uses a hard link (atomic, never replaces an existing file), with a check-then-rename fallback on file systems without hard links.
 
 For uploads, finalize using an atomic rename where supported, while accounting for platform-specific behavior and destination conflicts.
 
@@ -737,12 +774,15 @@ Memory consumption should not increase proportionally to the total size of a fil
 
 | Limit | Status |
 |---|---|
-| Concurrent downloads, total | Built: `max_concurrent_downloads`, 16 (includes hash requests) |
-| Concurrent downloads, per device | Built: `max_downloads_per_device`, 4 (includes hash requests) |
-| Request timeouts | Built: 30 s until the response starts (`request_timeout_secs`); `/hash` exempt; streaming isn't cut off |
-| Bounded buffering | Built: 64 KiB download chunks, 1 MiB hash buffer |
-| Request body size | Built: 64 KiB (`max_request_body_bytes`) |
-| Upload size, chunk size, active transfers, expiration | Planned, Phase 6 |
+| Concurrent transfers, total | Built: `max_concurrent_transfers`, 16 (downloads, hashes, upload chunks, finishing uploads) |
+| Concurrent transfers, per device | Built: `max_transfers_per_device`, 4 (same) |
+| Request timeouts | Built: 30 s until the response starts (`request_timeout_secs`); upload chunks 5 min (`chunk_upload_timeout_secs`); `/hash` and upload `complete` exempt; streaming isn't cut off |
+| Bounded buffering | Built: 64 KiB download chunks, 1 MiB hash buffer, one 4 MiB chunk in memory per upload request |
+| Request body size | Built: 64 KiB (`max_request_body_bytes`); upload chunks exactly their chunk length |
+| Maximum upload size | Built: `max_upload_bytes`, 10 GiB, plus a free-space check (size + 1 GiB) |
+| Maximum chunk size | Built: fixed 4 MiB |
+| Active (unfinished) uploads | Built: `max_uploads_per_device` 4, `max_uploads_total` 32 |
+| Transfer expiration | Built: `upload_expiry_secs`, 24 h after the last chunk |
 
 Over-limit requests get `429 too_many_requests`.
 
@@ -757,7 +797,7 @@ Data folder (`~/Library/Application Support/RiftView/` on macOS, or `RIFTVIEW_DA
 ```text
 RiftView/
 |
-├── riftview.db           SQLite: shares, devices, device_permissions
+├── riftview.db           SQLite: shares, devices, device_permissions, uploads
 ├── riftview.db-wal       SQLite write-ahead log (while the server runs)
 ├── riftview.db-shm
 ├── config.json           server settings
@@ -775,13 +815,15 @@ Database tables (schema in `src/database/migrations/`):
 | `shares` | Shared folders: ID, name, host path, writable |
 | `devices` | Trusted devices: ID, names, Ed25519 public key, type, platform, app version, timestamps, revocation |
 | `device_permissions` | One row per permission a device has |
+| `uploads` | Unfinished uploads: device, share, target folder, name, size, chunk size, expected SHA-256, activity times |
+| `upload_chunks` | One row per received, verified chunk |
 
 Persist:
 - Host configuration (`config.json`).
 - Shared directory definitions (SQLite).
 - Trusted device public keys (SQLite).
 - Device permissions (SQLite).
-- Transfer metadata and resumable transfer state *(planned, Phase 6; new relational state goes in SQLite)*.
+- Transfer metadata and resumable transfer state (SQLite, `uploads` + `upload_chunks`). Partial data lives in hidden `.part` files in the target folders.
 
 Not persisted: login sessions, pairing sessions and the SHA-256 cache. They live in memory, so a restart logs devices out and they sign in again.
 
@@ -795,6 +837,12 @@ Use:
 Never persist private device keys or plaintext passwords. The host only stores device *public* keys; private keys stay on each device.
 
 The backend should validate persisted transfer metadata against actual files before resuming operations.
+
+**As built:**
+- On restart, uploads continue from the chunks recorded in SQLite.
+- A chunk is recorded only after its data is written.
+- If the host crashes before that data reaches the disk, the whole-file SHA-256 check at finish catches it, and the upload is discarded.
+- A missing partial file makes chunk writes and finishing fail with `404`, and the upload then expires.
 
 ---
 
@@ -813,7 +861,7 @@ Potential cache targets:
 Directory caches should have short expiration periods or invalidation mechanisms because files can be changed outside the application.
 
 **As built:**
-- In memory: SHA-256 results (invalidated by file version), shares and devices (loaded from SQLite at startup, written through on change), sessions and pairing state.
+- In memory: which uploads are being finished; SHA-256 results (invalidated by file version), shares and devices (loaded from SQLite at startup, written through on change), sessions and pairing state.
 - Not built: a directory listing cache.
 
 Resource-management priorities:
@@ -956,16 +1004,17 @@ Measure:
 
 Benchmark different chunk sizes and concurrency limits.
 
-**As built:** 81 tests (`cargo test`).
-- **Unit tests:** path parsing, Range parsing, ETags, hash cache, download limits, stop signal, migrations, crypto, dates.
+**As built:** 103 tests (`cargo test`).
+- **Unit tests:** path parsing, Range parsing, ETags, hash cache, transfer limits, stop signal, migrations, crypto, dates, chunk arithmetic, rename candidates, reserved names.
 - **`tests/api_tests.rs`:** browsing, metadata, downloads, resume, hashing, a file changing mid-download, limits, a 5 GiB sparse file.
 - **`tests/auth_tests.rs`:** pairing and attack cases, login, replay, expiry, revocation, persistence across restart.
 - **`tests/security_tests.rs`:** traversal, symlink escapes, named pipes, forged IDs.
+- **`tests/upload_tests.rs`:** out-of-order chunks, corrupt and wrong-size chunks, whole-file mismatch, name clashes, permissions and read-only shares, size limit, disk space, open-upload limits, per-device privacy, hidden partial files, restart, expiry, share removal.
 
 Not yet covered:
 - config loading tests
 - a race test for swapping a folder for a symlink mid-lookup
-- uploads, conflicts
+- the hard-link fallback on file systems without hard links (e.g. exFAT)
 - performance measurements (§13.4)
 
 ---
@@ -1058,7 +1107,11 @@ Tasks:
 
 Deliverable: Reliable resumable uploads.
 
-**Status: not started.** Transfer state will go in SQLite.
+**Status: done.**
+- Chunked (4 MiB), resumable, per-chunk and whole-file SHA-256, transfer state in SQLite.
+- Atomic no-replace finish, with auto-rename on name clashes.
+- 24 h expiry, size, disk-space and open-upload limits, "list my uploads".
+- Not built: reading a chunk back (`GET …/chunks/{index}`). Remaining: testing the hard-link fallback on exFAT.
 
 ## Phase 7: Filesystem Management
 

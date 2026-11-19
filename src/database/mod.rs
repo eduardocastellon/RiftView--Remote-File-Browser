@@ -20,7 +20,10 @@ pub const DATABASE_FILE_NAME: &str = "riftview.db";
 
 /// Every schema change, oldest first. Entry N moves the database from
 /// version N to version N + 1.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001_devices_and_shares.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_devices_and_shares.sql"),
+    include_str!("migrations/002_uploads.sql"),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {

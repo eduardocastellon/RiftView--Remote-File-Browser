@@ -13,6 +13,7 @@ use crate::auth::pairing::PairingError;
 use crate::auth::sessions::LoginError;
 use crate::filesystem::FsError;
 use crate::filesystem::roots::ShareError;
+use crate::transfers::uploads::UploadError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -39,6 +40,18 @@ pub enum AppError {
     #[error("too many requests; slow down")]
     TooManyRequests,
 
+    /// E.g. an upload bigger than `max_upload_bytes`.
+    #[error("{0}")]
+    PayloadTooLarge(String),
+
+    /// The host's disk doesn't have room for an upload.
+    #[error("not enough free disk space on the host")]
+    InsufficientStorage,
+
+    /// Data didn't match the SHA-256 the client said it would have.
+    #[error("{0}")]
+    ChecksumMismatch(String),
+
     #[error("{0}")]
     Unavailable(String),
 
@@ -60,6 +73,13 @@ impl AppError {
                 (StatusCode::RANGE_NOT_SATISFIABLE, "range_not_satisfiable")
             }
             AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),
+            AppError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            AppError::InsufficientStorage => {
+                (StatusCode::INSUFFICIENT_STORAGE, "insufficient_storage")
+            }
+            AppError::ChecksumMismatch(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "checksum_mismatch")
+            }
             AppError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
@@ -110,6 +130,7 @@ impl From<FsError> for AppError {
             // Only happens when nobody is waiting for the response, so the
             // client never actually sees this.
             FsError::Abandoned => AppError::Unavailable("request was abandoned".into()),
+            FsError::NoFreeName => AppError::Conflict("no free file name".into()),
         }
     }
 }
@@ -160,5 +181,21 @@ impl From<DeviceError> for AppError {
                 AppError::Internal
             }
         }
+    }
+}
+
+impl From<UploadError> for AppError {
+    fn from(error: UploadError) -> Self {
+        match error {
+            UploadError::TooMany => AppError::TooManyRequests,
+            UploadError::Database(database_error) => database_error.into(),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        tracing::error!(%error, "database error");
+        AppError::Internal
     }
 }

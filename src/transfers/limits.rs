@@ -1,13 +1,15 @@
-//! How many downloads (and hash computations) may run at the same time.
+//! How many transfers may run at the same time: downloads, hash requests,
+//! upload chunks being received and uploads being finished.
 //!
-//! Each one holds a [`DownloadSlot`] for as long as it runs. The slot is
+//! Each one holds a [`TransferSlot`] for as long as it runs. The slot is
 //! given back automatically when it is dropped: when the last byte is
-//! sent, when the device disconnects, or when an error stops the transfer.
+//! sent or received, when the device disconnects, or when an error stops
+//! the transfer.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-pub struct DownloadLimiter {
+pub struct TransferLimiter {
     max_total: usize,
     max_per_device: usize,
     active: Arc<Mutex<ActiveDownloads>>,
@@ -16,17 +18,17 @@ pub struct DownloadLimiter {
 #[derive(Default)]
 struct ActiveDownloads {
     total: usize,
-    /// Device ID → how many downloads that device is running.
+    /// Device ID → how many transfers that device is running.
     per_device: HashMap<String, usize>,
 }
 
-/// Permission to run one download. Dropping it frees the slot.
-pub struct DownloadSlot {
+/// Permission to run one transfer. Dropping it frees the slot.
+pub struct TransferSlot {
     active: Arc<Mutex<ActiveDownloads>>,
     device_id: String,
 }
 
-impl DownloadLimiter {
+impl TransferLimiter {
     pub fn new(max_total: usize, max_per_device: usize) -> Self {
         Self {
             max_total,
@@ -37,7 +39,7 @@ impl DownloadLimiter {
 
     /// A slot for `device_id`, or `None` if the device or the whole host
     /// is already at its limit.
-    pub fn try_start(&self, device_id: &str) -> Option<DownloadSlot> {
+    pub fn try_start(&self, device_id: &str) -> Option<TransferSlot> {
         let mut active = self.active.lock().unwrap();
 
         let running_for_device = active.per_device.get(device_id).copied().unwrap_or(0);
@@ -50,14 +52,14 @@ impl DownloadLimiter {
             .per_device
             .insert(device_id.to_owned(), running_for_device + 1);
 
-        Some(DownloadSlot {
+        Some(TransferSlot {
             active: Arc::clone(&self.active),
             device_id: device_id.to_owned(),
         })
     }
 }
 
-impl Drop for DownloadSlot {
+impl Drop for TransferSlot {
     fn drop(&mut self) {
         let mut active = self.active.lock().unwrap();
         active.total -= 1;
@@ -77,7 +79,7 @@ mod tests {
 
     #[test]
     fn enforces_per_device_limit() {
-        let limiter = DownloadLimiter::new(10, 2);
+        let limiter = TransferLimiter::new(10, 2);
 
         let first = limiter.try_start("phone").unwrap();
         let _second = limiter.try_start("phone").unwrap();
@@ -96,7 +98,7 @@ mod tests {
 
     #[test]
     fn enforces_total_limit() {
-        let limiter = DownloadLimiter::new(2, 5);
+        let limiter = TransferLimiter::new(2, 5);
 
         let _a = limiter.try_start("phone").unwrap();
         let b = limiter.try_start("laptop").unwrap();

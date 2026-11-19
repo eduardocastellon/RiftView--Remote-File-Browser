@@ -111,6 +111,17 @@ impl TestHost {
         host
     }
 
+    /// Simulate a host restart: load everything again from the data folder.
+    /// Sessions live in memory, so devices must log in again afterwards.
+    pub fn restart(&mut self) {
+        let config = self.state.config().clone();
+        let state = AppState::load(config, self.data_dir.path().to_path_buf()).unwrap();
+        self.app = app(state.clone()).layer(MockConnectInfo(SocketAddr::from(DEVICE_ADDRESS)));
+        self.admin =
+            admin_app(state.clone()).layer(MockConnectInfo(SocketAddr::from(LOOPBACK_ADDRESS)));
+        self.state = state;
+    }
+
     /// The real path of the shared folder on disk.
     pub fn shared_path(&self) -> &Path {
         self.shared_dir.path()

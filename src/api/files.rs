@@ -140,7 +140,7 @@ pub async fn download(
     };
 
     let slot = state
-        .download_limiter()
+        .transfer_limiter()
         .try_start(&device.id)
         .ok_or(AppError::TooManyRequests)?;
 
@@ -245,7 +245,7 @@ pub async fn hash(
         Some(cached) => cached,
         None => {
             let _slot = state
-                .download_limiter()
+                .transfer_limiter()
                 .try_start(&device.id)
                 .ok_or(AppError::TooManyRequests)?;
 

@@ -1,12 +1,23 @@
 //! Looking up a single file or folder, and opening files to download.
-//! (Writing, renaming and deleting arrive in phases 6 and 7.)
+//! (Uploads are in [`super::writing`]; renaming and deleting arrive in
+//! phase 7.)
 
 use super::metadata::{Entry, EntryKind, to_epoch_ms};
 use super::roots::Share;
+use super::writing::is_upload_file_name;
 use super::{FsError, RelPath, run_blocking};
+
+/// Partial upload files are invisible to devices, even if named directly.
+fn refuse_partial_uploads(path: &RelPath) -> Result<(), FsError> {
+    match path.file_name() {
+        Some(name) if is_upload_file_name(name) => Err(FsError::NotFound),
+        _ => Ok(()),
+    }
+}
 
 /// Information about one file or folder inside a share.
 pub async fn stat(share: Share, path: RelPath) -> Result<Entry, FsError> {
+    refuse_partial_uploads(&path)?;
     run_blocking(move || {
         let root = share.open_root()?;
 
@@ -33,6 +44,7 @@ pub struct OpenedFile {
 }
 
 pub async fn open_file(share: Share, path: RelPath) -> Result<OpenedFile, FsError> {
+    refuse_partial_uploads(&path)?;
     run_blocking(move || {
         if path.is_root() {
             return Err(FsError::NotAFile);

@@ -51,12 +51,33 @@ pub struct Config {
     /// Largest allowed request body for ordinary (non-upload) requests.
     pub max_request_body_bytes: usize,
 
-    /// Downloads (and SHA-256 hash requests) that may run at once across
-    /// all devices. Extra requests get `429 too_many_requests`.
-    pub max_concurrent_downloads: usize,
+    /// Transfers that may run at once across all devices: downloads, hash
+    /// requests, upload chunks being received and uploads being finished.
+    /// Extra requests get `429 too_many_requests`.
+    #[serde(alias = "max_concurrent_downloads")] // Name before uploads existed.
+    pub max_concurrent_transfers: usize,
 
-    /// Downloads (and SHA-256 hash requests) one device may run at once.
-    pub max_downloads_per_device: usize,
+    /// Transfers (as above) one device may run at once.
+    #[serde(alias = "max_downloads_per_device")] // Name before uploads existed.
+    pub max_transfers_per_device: usize,
+
+    /// Largest file a device may upload, in bytes.
+    pub max_upload_bytes: u64,
+
+    /// Unfinished uploads one device may have open at once.
+    pub max_uploads_per_device: usize,
+
+    /// Unfinished uploads open at once across all devices.
+    pub max_uploads_total: usize,
+
+    /// An unfinished upload with no new chunk for this long is deleted,
+    /// along with its partial file.
+    pub upload_expiry_secs: u64,
+
+    /// How long one upload chunk request may take, including receiving its
+    /// body. Longer than `request_timeout_secs` because a 4 MiB chunk over
+    /// a slow mobile connection can take a while.
+    pub chunk_upload_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -72,8 +93,13 @@ impl Default for Config {
             max_dir_entries: 100_000,
             request_timeout_secs: 30,
             max_request_body_bytes: 64 * 1024,
-            max_concurrent_downloads: 16,
-            max_downloads_per_device: 4,
+            max_concurrent_transfers: 16,
+            max_transfers_per_device: 4,
+            max_upload_bytes: 10 * 1024 * 1024 * 1024, // 10 GiB
+            max_uploads_per_device: 4,
+            max_uploads_total: 32,
+            upload_expiry_secs: 24 * 60 * 60,
+            chunk_upload_timeout_secs: 5 * 60,
         }
     }
 }

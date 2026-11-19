@@ -70,6 +70,11 @@ impl AdminClient {
                 .post(url)
                 .header("Authorization", auth)
                 .send_empty(),
+            ("PATCH", Some(body)) => self
+                .agent
+                .patch(url)
+                .header("Authorization", auth)
+                .send_json(body),
             ("DELETE", _) => self.agent.delete(url).header("Authorization", auth).call(),
             _ => return Err(format!("unsupported method {method}")),
         };
@@ -379,6 +384,36 @@ pub fn add_share(name: &str, path: &Path, writable: bool) -> CliResult {
         share["name"].as_str().unwrap_or(name),
         share["id"].as_str().unwrap_or("?")
     );
+    Ok(())
+}
+
+pub fn rename_share(share_id: &str, new_name: &str) -> CliResult {
+    let client = AdminClient::connect()?;
+    let body = json!({ "name": new_name });
+    let share =
+        expect_success(client.send("PATCH", &format!("/admin/shares/{share_id}"), Some(body))?)?;
+    println!(
+        "{share_id} is now called \"{}\". Devices see the new name right away.",
+        share["name"].as_str().unwrap_or(new_name)
+    );
+    Ok(())
+}
+
+pub fn set_share_writable(share_id: &str, writable: bool) -> CliResult {
+    let client = AdminClient::connect()?;
+    let body = json!({ "writable": writable });
+    let share =
+        expect_success(client.send("PATCH", &format!("/admin/shares/{share_id}"), Some(body))?)?;
+    let name = share["name"].as_str().unwrap_or(share_id);
+
+    if writable {
+        println!(
+            "\"{name}\" is now writable. Devices with the upload, rename, move or delete \
+             permission can change files in it."
+        );
+    } else {
+        println!("\"{name}\" is now read-only. No device can change files in it.");
+    }
     Ok(())
 }
 

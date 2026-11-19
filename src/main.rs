@@ -54,6 +54,22 @@ enum ShareCommand {
         #[arg(long)]
         writable: bool,
     },
+    /// Change the name devices see for a share.
+    Rename {
+        share_id: String,
+        /// The new name.
+        name: String,
+    },
+    /// Allow (yes) or forbid (no) devices to change files in a share.
+    SetWritable {
+        share_id: String,
+        /// yes or no (also accepts true/false, on/off).
+        #[arg(
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        writable: bool,
+    },
     /// Stop sharing a folder (the folder itself is not touched).
     Remove { share_id: String },
 }
@@ -74,6 +90,12 @@ fn main() -> ExitCode {
             path,
             writable,
         }) => cli::add_share(&name, &path, writable),
+        Command::Share(ShareCommand::Rename { share_id, name }) => {
+            cli::rename_share(&share_id, &name)
+        }
+        Command::Share(ShareCommand::SetWritable { share_id, writable }) => {
+            cli::set_share_writable(&share_id, writable)
+        }
         Command::Share(ShareCommand::Remove { share_id }) => cli::remove_share(&share_id),
     };
 
@@ -104,4 +126,35 @@ fn set_up_logging() {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Catches mistakes in the command definitions (which clap would
+    /// otherwise only report when someone runs the command).
+    #[test]
+    fn command_line_definitions_are_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn set_writable_accepts_yes_and_no() {
+        for (word, expected) in [("yes", true), ("no", false), ("true", true), ("off", false)] {
+            let args =
+                Args::try_parse_from(["riftview-api", "share", "set-writable", "shr_1", word])
+                    .unwrap();
+            let Some(Command::Share(ShareCommand::SetWritable { writable, .. })) = args.command
+            else {
+                panic!("parsed the wrong command");
+            };
+            assert_eq!(writable, expected, "{word}");
+        }
+
+        let maybe =
+            Args::try_parse_from(["riftview-api", "share", "set-writable", "shr_1", "maybe"]);
+        assert!(maybe.is_err());
+    }
 }

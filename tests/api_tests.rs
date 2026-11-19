@@ -376,7 +376,7 @@ async fn file_edited_during_download_cuts_the_connection() {
 async fn concurrent_downloads_are_limited_per_device() {
     let host = TestHost::with_config(riftview_api::config::Config {
         auth_rate_limit_per_minute: 1000,
-        max_downloads_per_device: 1,
+        max_transfers_per_device: 1,
         ..Default::default()
     })
     .await;
@@ -404,7 +404,7 @@ async fn concurrent_downloads_are_limited_per_device() {
 async fn concurrent_downloads_are_limited_in_total() {
     let host = TestHost::with_config(riftview_api::config::Config {
         auth_rate_limit_per_minute: 1000,
-        max_concurrent_downloads: 1,
+        max_concurrent_transfers: 1,
         ..Default::default()
     })
     .await;

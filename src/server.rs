@@ -20,7 +20,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::{Config, ConfigError};
 use crate::state::{AppState, StateError};
-use crate::{admin, api, platform, storage};
+use crate::{admin, api, platform, storage, transfers};
 
 /// How long open connections get to finish when shutting down.
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
@@ -83,6 +83,9 @@ pub async fn run() -> Result<(), StartupError> {
     }
 
     let state = AppState::load(config.clone(), data_dir.clone())?;
+
+    // Delete abandoned uploads now and every few minutes.
+    transfers::cleanup::spawn_cleanup_task(state.clone());
     let identity = state.identity();
     let tls_config =
         RustlsConfig::from_pem(identity.cert_pem.clone(), identity.key_pem.clone()).await?;

@@ -42,6 +42,11 @@ pub async fn sha256_of<R: AsyncRead + Unpin>(mut reader: R) -> io::Result<Sha256
     Ok(hasher.finalize().into())
 }
 
+/// SHA-256 of bytes already in memory (e.g. one upload chunk).
+pub fn sha256_of_bytes(bytes: &[u8]) -> Sha256Hash {
+    Sha256::digest(bytes).into()
+}
+
 /// Lowercase hex, e.g. `9f86d081…`.
 pub fn to_hex(hash: &Sha256Hash) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()

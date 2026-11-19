@@ -26,7 +26,7 @@ use futures_util::{Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::io::ReaderStream;
 
-use super::limits::DownloadSlot;
+use super::limits::TransferSlot;
 use super::version::FileVersion;
 
 /// How much of a file we hold in memory at once.
@@ -48,7 +48,7 @@ pub struct DownloadSource<R> {
     /// The version we promised the device (in the `ETag` header).
     pub version: FileVersion,
     /// Held until the stream ends, so the download counts towards limits.
-    pub slot: DownloadSlot,
+    pub slot: TransferSlot,
 }
 
 /// Turn a [`DownloadSource`] into a stream of chunks for the response body.
@@ -82,7 +82,7 @@ struct StreamState<R> {
     bytes_since_check: u64,
     watcher: File,
     version: FileVersion,
-    _slot: DownloadSlot,
+    _slot: TransferSlot,
 }
 
 impl<R: AsyncRead + Unpin> StreamState<R> {

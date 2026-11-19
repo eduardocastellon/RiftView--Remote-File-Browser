@@ -17,7 +17,8 @@ use crate::error::AppError;
 use crate::filesystem::roots::{Share, ShareStore};
 use crate::tls::{HostIdentity, TlsError};
 use crate::transfers::hashing::HashCache;
-use crate::transfers::limits::DownloadLimiter;
+use crate::transfers::limits::TransferLimiter;
+use crate::transfers::uploads::UploadStore;
 
 /// Shared application state. Cloning is cheap: every clone points at the
 /// same data.
@@ -34,8 +35,9 @@ struct Inner {
     pairing: PairingManager,
     sessions: SessionManager,
     auth_rate_limiter: RateLimiter,
-    download_limiter: DownloadLimiter,
+    transfer_limiter: TransferLimiter,
     hash_cache: HashCache,
+    uploads: UploadStore,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,14 +55,15 @@ impl AppState {
     pub fn load(config: Config, data_dir: PathBuf) -> Result<Self, StateError> {
         let database = Database::open(&data_dir)?;
         let shares = ShareStore::load(database.clone(), &data_dir)?;
-        let devices = DeviceStore::load(database)?;
+        let devices = DeviceStore::load(database.clone())?;
+        let uploads = UploadStore::new(database);
         let identity = HostIdentity::load_or_create(&data_dir)?;
         let admin_token = AdminToken::load_or_create(&data_dir)?;
         let sessions = SessionManager::new(Duration::from_secs(config.session_lifetime_secs));
         let auth_rate_limiter = RateLimiter::new(config.auth_rate_limit_per_minute);
-        let download_limiter = DownloadLimiter::new(
-            config.max_concurrent_downloads,
-            config.max_downloads_per_device,
+        let transfer_limiter = TransferLimiter::new(
+            config.max_concurrent_transfers,
+            config.max_transfers_per_device,
         );
 
         Ok(Self(Arc::new(Inner {
@@ -73,8 +76,9 @@ impl AppState {
             pairing: PairingManager::default(),
             sessions,
             auth_rate_limiter,
-            download_limiter,
+            transfer_limiter,
             hash_cache: HashCache::default(),
+            uploads,
         })))
     }
 
@@ -114,12 +118,16 @@ impl AppState {
         &self.0.auth_rate_limiter
     }
 
-    pub fn download_limiter(&self) -> &DownloadLimiter {
-        &self.0.download_limiter
+    pub fn transfer_limiter(&self) -> &TransferLimiter {
+        &self.0.transfer_limiter
     }
 
     pub fn hash_cache(&self) -> &HashCache {
         &self.0.hash_cache
+    }
+
+    pub fn uploads(&self) -> &UploadStore {
+        &self.0.uploads
     }
 
     /// A copy of one share's details, or a 404 error if it doesn't exist.
