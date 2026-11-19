@@ -61,6 +61,9 @@ POST /api/pairing/complete
   "pairing_id": "pair_…",
   "device_name": "Lalo's iPhone",            // 1–64 printable characters
   "device_public_key": "<32 bytes>",
+  "device_type": "phone",                    // phone | tablet | laptop | desktop | other
+  "platform": "ios",                         // ios | android | macos | windows | linux | other
+  "app_version": "1.4.0",                    // 1–32 chars: letters, digits, . - +
   "proof": "<HMAC-SHA256(shared_key, client_confirm)>"
 }
 
@@ -81,7 +84,9 @@ If it doesn't match, abort: something is tampering with the connection.
 
 A wrong proof returns `403` and **ends the pairing session**. The host must run `pair` again, so an attacker gets one guess per code.
 
-**Step 3: wait for the host user.** The host terminal shows the device name and its key fingerprint (`SHA256:` + first 8 bytes of SHA-256 of the public key, in hex). The app can show the same fingerprint so the user can compare. Poll:
+`device_type`, `platform` and `app_version` are not part of the proof. They are protected by the TLS connection, whose certificate the proof does cover.
+
+**Step 3: wait for the host user.** The host terminal shows the device name, type, platform, app version and key fingerprint (`SHA256:` + first 8 bytes of SHA-256 of the public key, in hex). The app can show the same fingerprint so the user can compare. Poll:
 
 ```http
 GET /api/pairing/{pairing_id}
@@ -104,7 +109,11 @@ Sign `login` (see §2) with the device's Ed25519 private key:
 
 ```http
 POST /api/auth/session
-{ "challenge_id": "…", "signature": "<64 bytes>" }
+{
+  "challenge_id": "…",
+  "signature": "<64 bytes>",
+  "app_version": "1.5.0"          // optional: send it so the host sees the current version
+}
 
 200 { "token": "…", "expires_in_secs": 3600 }
 ```
@@ -117,7 +126,7 @@ Authorization: Bearer <token>
 
 When a request returns `401`, log in again. `DELETE /api/auth/session` logs out.
 
-`GET /api/devices/me` returns the device's ID, name and permissions (`browse`, `read`, `upload`, `rename`, `move`, `delete`). A missing permission gives `403`.
+`GET /api/devices/me` returns the device's ID, name, `device_type`, `platform` and permissions (`browse`, `read`, `upload`, `rename`, `move`, `delete`). `name` is the alias the host user gave the device, if any, otherwise the name it paired with. A missing permission gives `403`.
 
 ## 5. Errors and limits
 

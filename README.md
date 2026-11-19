@@ -2,7 +2,7 @@
 
 A self-hosted Rust service that lets your paired devices browse and download folders you choose to share. It runs on your computer and is reached over your LAN or any VPN you like (Tailscale, Radmin, Hamachi…). No cloud service involved. See [planning.md](planning.md) for the full specification.
 
-> **Status:** phases 1–4 and the download part of phase 5 are done: secure filesystem layer, read API with streaming downloads, HTTPS, device pairing, login and permissions. Uploads and file management (phases 6–7) are next.
+> **Status:** phases 1–5 are done: secure filesystem layer, read API, HTTPS, device pairing, login and permissions, and the download engine (streaming, resume with `ETag`/`If-Range`, SHA-256 verification, concurrent download limits). Uploads and file management (phases 6–7) are next.
 
 ## Quick start
 
@@ -14,6 +14,7 @@ cargo run -- share add Photos ~/Pictures      # share a folder (read-only)
 cargo run -- share add Inbox ~/Inbox --writable
 cargo run -- pair                             # shows a 6-digit code; approve the device
 cargo run -- devices                          # list paired devices
+cargo run -- rename dev_… "Work phone"        # your own name for a device (omit to clear)
 cargo run -- revoke dev_…                     # cut a device off immediately
 cargo run -- info                             # addresses and certificate pin
 ```
@@ -29,6 +30,7 @@ cargo run -- info                             # addresses and certificate pin
 - **Pairing:** six-digit code shown on the host, entered on the device. The code is never sent over the network (SPAKE2). A wrong guess burns the code. The host user then approves the device as read-only or full access.
 - **Login:** every connection, the device signs a single-use challenge with its Ed25519 key and gets a session token (1 hour).
 - **Admin API:** loopback only, and it also needs the token in `<data dir>/admin_token`, which only your OS user can read.
+- **Storage:** shares, devices and device permissions live in a SQLite database, `riftview.db`, in the data folder. Settings and secrets stay as files.
 
 Client developers: the exact protocol is in [docs/auth-protocol.md](docs/auth-protocol.md).
 
@@ -42,11 +44,21 @@ Client developers: the exact protocol is in [docs/auth-protocol.md](docs/auth-pr
 | `admin_bind` | `127.0.0.1:7879` | Must be loopback. |
 | `session_lifetime_secs` | `3600` | |
 | `auth_rate_limit_per_minute` | `20` | Pairing/login requests per IP. |
+| `max_concurrent_downloads` | `16` | Downloads + hash requests running at once, all devices. |
+| `max_downloads_per_device` | `4` | Downloads + hash requests running at once, per device. |
 | `max_list_limit`, `max_dir_entries`, `request_timeout_secs`, `max_request_body_bytes` | | Resource limits |
 
 Environment overrides: `RIFTVIEW_DATA_DIR`, `RIFTVIEW_BIND`, `RUST_LOG`.
 
 Data folder (owner-only permissions):
+
+| File | Holds |
+|---|---|
+| `riftview.db` (+ `-wal`, `-shm`) | Shares, devices, device permissions (SQLite) |
+| `config.json` | Settings above |
+| `admin_token` | Secret for the admin API |
+| `tls/` | Self-signed certificate and its private key |
+
 
 | OS | Path |
 |---|---|
@@ -67,7 +79,8 @@ Data folder (owner-only permissions):
 | GET | `/api/shares`, `/api/shares/{id}` | `browse` |
 | GET | `/api/shares/{id}/files?path=&sort=&order=&offset=&limit=` | `browse` |
 | GET | `/api/files/{id}` | `browse` |
-| GET | `/api/files/{id}/download` (supports `Range`) | `read` |
+| GET | `/api/files/{id}/download` (supports `Range` + `If-Range`, sends `ETag`) | `read` |
+| GET | `/api/files/{id}/hash` → `{sha256, size, etag}` (no request timeout; cached) | `read` |
 
 Errors are JSON: `{"error":{"code":"not_found","message":"not found"}}`. They never contain host paths.
 
@@ -86,7 +99,9 @@ src/
   admin/       host-only admin API + admin token
   auth/        pairing (SPAKE2), login sessions, devices & permissions, rate limit
   filesystem/  resolver, shares, browsing, metadata, file opening — no HTTP
-  storage/     atomic JSON/byte files
+  transfers/   download streaming, ETags, SHA-256 hashing, download limits
+  database/    SQLite connection and numbered schema migrations (migrations/*.sql)
+  storage/     atomic writes for config, admin token, certificate
   platform/    per-OS data folders and file permissions
   cli.rs       `pair`, `share`, `devices`, … commands
   tls.rs       self-signed certificate and pin

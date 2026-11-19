@@ -1,13 +1,12 @@
-//! Browsing folders, file details, and downloads.
+//! Browsing folders, file details, downloads and SHA-256 hashes.
 
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_util::io::ReaderStream;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncSeekExt;
 
 use crate::auth::{AuthenticatedDevice, Permission};
 use crate::error::AppError;
@@ -16,12 +15,12 @@ use crate::filesystem::metadata::Entry;
 use crate::filesystem::roots::Share;
 use crate::filesystem::{FileId, RelPath, operations};
 use crate::state::AppState;
+use crate::transfers::hashing;
+use crate::transfers::stream::{DownloadSource, download_stream};
+use crate::transfers::version::FileVersion;
 
 /// Page size when the client doesn't specify one.
 const DEFAULT_PAGE_SIZE: usize = 200;
-
-/// How much of a file we hold in memory at once while streaming it.
-const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Browsing
@@ -104,10 +103,9 @@ async fn look_up_file_id(state: &AppState, file_id: &str) -> Result<(Share, RelP
 
 /// `GET /api/files/{id}/download`
 ///
-/// Streams the file in small chunks, so memory use stays flat no matter
-/// how big the file is. Supports a single `Range` (for resuming). If the
-/// client disconnects, the response is dropped, which closes the file and
-/// stops reading.
+/// Streams the file (see [`crate::transfers::stream`]). Supports a single
+/// `Range` for resuming, guarded by `If-Range` so a resume never mixes two
+/// versions of the file. Counts towards the device's download limit.
 pub async fn download(
     device: AuthenticatedDevice,
     State(state): State<AppState>,
@@ -119,13 +117,19 @@ pub async fn download(
     let (share, path) = look_up_file_id(&state, &file_id).await?;
     let opened = operations::open_file(share, path).await?;
     let file_size = opened.size;
+    let version = FileVersion::of(&opened.file).map_err(internal_error)?;
+    let etag = version.etag();
 
     // Work out which bytes to send.
-    let range_header = request_headers
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok());
+    let range_header = header_text(&request_headers, header::RANGE);
+    let if_range_header = header_text(&request_headers, header::IF_RANGE);
+    let range = if resume_is_safe(if_range_header, &etag) {
+        parse_range(range_header, file_size)
+    } else {
+        RangeRequest::WholeFile // The file changed: start over.
+    };
 
-    let (status, first_byte, byte_count) = match parse_range(range_header, file_size) {
+    let (status, first_byte, byte_count) = match range {
         RangeRequest::WholeFile => (StatusCode::OK, 0, file_size),
         RangeRequest::Partial { start, end } => {
             (StatusCode::PARTIAL_CONTENT, start, end - start + 1)
@@ -135,19 +139,29 @@ pub async fn download(
         }
     };
 
+    let slot = state
+        .download_limiter()
+        .try_start(&device.id)
+        .ok_or(AppError::TooManyRequests)?;
+
     // Build a body that streams exactly those bytes.
-    let mut file = tokio::fs::File::from_std(opened.file);
+    let watcher = opened.file.try_clone().map_err(internal_error)?;
+    let mut reader = tokio::fs::File::from_std(opened.file);
     if first_byte > 0 {
-        file.seek(std::io::SeekFrom::Start(first_byte))
+        reader
+            .seek(std::io::SeekFrom::Start(first_byte))
             .await
-            .map_err(|error| {
-                tracing::error!(%error, "seek failed");
-                AppError::Internal
-            })?;
+            .map_err(internal_error)?;
     }
-    let limited_reader = file.take(byte_count);
-    let stream = ReaderStream::with_capacity(limited_reader, STREAM_CHUNK_BYTES);
-    let mut response = (status, Body::from_stream(stream)).into_response();
+    let source = DownloadSource {
+        reader,
+        byte_count,
+        watcher,
+        version,
+        slot,
+    };
+    let body = Body::from_stream(download_stream(source));
+    let mut response = (status, body).into_response();
 
     // Response headers.
     let headers = response.headers_mut();
@@ -160,6 +174,7 @@ pub async fn download(
     headers.insert(header::CONTENT_TYPE, header_value(mime_type));
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(byte_count));
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(header::ETAG, header_value(&etag));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     // Stop browsers from second-guessing the content type.
     headers.insert(
@@ -178,6 +193,87 @@ pub async fn download(
     }
 
     Ok(response)
+}
+
+/// May we honour a `Range` request? Yes, unless the client sent `If-Range`
+/// with an ETag that no longer matches (the file changed since its first
+/// request). Dates in `If-Range` aren't supported, so they count as a
+/// mismatch: sending the whole file is always safe.
+fn resume_is_safe(if_range: Option<&str>, current_etag: &str) -> bool {
+    match if_range {
+        None => true,
+        Some(sent_etag) => sent_etag.trim() == current_etag,
+    }
+}
+
+fn header_text(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct HashResponse {
+    /// Lowercase hex.
+    sha256: String,
+    size: u64,
+    /// The same value as the download's `ETag` header for this version of
+    /// the file, so the client can tell the hash matches what it downloaded.
+    etag: String,
+}
+
+/// `GET /api/files/{id}/hash`
+///
+/// Reads the whole file, so it can take a while for big files (it's exempt
+/// from the request timeout). The result is cached until the file changes.
+/// Counts towards the device's download limit while it runs.
+pub async fn hash(
+    device: AuthenticatedDevice,
+    State(state): State<AppState>,
+    Path(file_id): Path<String>,
+) -> Result<Json<HashResponse>, AppError> {
+    device.require(Permission::Read)?;
+
+    let (share, path) = look_up_file_id(&state, &file_id).await?;
+    let opened = operations::open_file(share, path).await?;
+    let version = FileVersion::of(&opened.file).map_err(internal_error)?;
+    let cache_key = opened.entry.id.clone();
+
+    let sha256 = match state.hash_cache().get(&cache_key, version) {
+        Some(cached) => cached,
+        None => {
+            let _slot = state
+                .download_limiter()
+                .try_start(&device.id)
+                .ok_or(AppError::TooManyRequests)?;
+
+            let watcher = opened.file.try_clone().map_err(internal_error)?;
+            let reader = tokio::fs::File::from_std(opened.file);
+            let sha256 = hashing::sha256_of(reader).await.map_err(internal_error)?;
+
+            if FileVersion::of(&watcher).map_err(internal_error)? != version {
+                return Err(AppError::Conflict(
+                    "file changed while it was being hashed; try again".into(),
+                ));
+            }
+            state.hash_cache().insert(&cache_key, version, sha256);
+            sha256
+        }
+    };
+
+    Ok(Json(HashResponse {
+        sha256: hashing::to_hex(&sha256),
+        size: version.size,
+        etag: version.etag(),
+    }))
+}
+
+/// Log an unexpected I/O error and hide its details from the client.
+fn internal_error(error: std::io::Error) -> AppError {
+    tracing::error!(%error, "file I/O error");
+    AppError::Internal
 }
 
 /// Make a header value, falling back to a harmless default if the text
@@ -330,6 +426,15 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=0-1,5-6"), 100), WholeFile);
         assert_eq!(parse_range(Some("items=0-1"), 100), WholeFile);
         assert_eq!(parse_range(Some("bytes=abc"), 100), WholeFile);
+    }
+
+    #[test]
+    fn resume_needs_a_matching_etag() {
+        let etag = "\"abc\"";
+        assert!(resume_is_safe(None, etag));
+        assert!(resume_is_safe(Some("\"abc\""), etag));
+        assert!(!resume_is_safe(Some("\"old\""), etag));
+        assert!(!resume_is_safe(Some("Wed, 21 Oct 2015 07:28:00 GMT"), etag));
     }
 
     #[test]

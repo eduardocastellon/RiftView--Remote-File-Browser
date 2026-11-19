@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::crypto::{decode_base64, encode_base64};
+use crate::auth::devices::{DeviceType, Platform, validate_app_version};
 use crate::auth::sessions::CHALLENGE_LIFETIME;
 use crate::auth::{AuthenticatedDevice, Permission};
 use crate::error::AppError;
@@ -48,6 +49,9 @@ pub struct LoginRequest {
     challenge_id: String,
     /// Ed25519 signature (64 bytes) of the login message, base64.
     signature: String,
+    /// The app's current version, if it changed since pairing (optional).
+    #[serde(default)]
+    app_version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -63,14 +67,33 @@ pub async fn log_in(
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let signature = decode_base64(&request.signature).ok_or(AppError::Unauthorized)?;
+    let app_version = request
+        .app_version
+        .as_deref()
+        .map(validate_app_version)
+        .transpose()
+        .map_err(|reason| AppError::BadRequest(reason.into()))?;
 
-    let devices = state.devices().read().await;
-    let session = state.sessions().log_in(
-        &request.challenge_id,
-        &signature,
-        &devices,
-        &state.identity().key_hash,
-    )?;
+    let session = {
+        let devices = state.devices().read().await;
+        state.sessions().log_in(
+            &request.challenge_id,
+            &signature,
+            &devices,
+            &state.identity().key_hash,
+        )?
+    };
+
+    // The login already succeeded, so a failure to save this bookkeeping is
+    // logged rather than turned into an error for the device.
+    let recorded = state
+        .devices()
+        .write()
+        .await
+        .record_login(&session.device_id, app_version);
+    if let Err(error) = recorded {
+        tracing::warn!(device_id = %session.device_id, %error, "could not record login");
+    }
 
     Ok(Json(LoginResponse {
         token: session.token,
@@ -87,7 +110,10 @@ pub async fn log_out(device: AuthenticatedDevice, State(state): State<AppState>)
 #[derive(Serialize)]
 pub struct MeResponse {
     id: String,
+    /// The host user's alias for this device if set, otherwise its own name.
     name: String,
+    device_type: DeviceType,
+    platform: Platform,
     permissions: BTreeSet<Permission>,
 }
 
@@ -96,6 +122,8 @@ pub async fn me(device: AuthenticatedDevice) -> Json<MeResponse> {
     Json(MeResponse {
         id: device.id,
         name: device.name,
+        device_type: device.device_type,
+        platform: device.platform,
         permissions: device.permissions,
     })
 }

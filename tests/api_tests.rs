@@ -240,3 +240,224 @@ async fn large_file_streams_intact() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_bytes(response).await, five_mib);
 }
+
+// --- Download integrity ----------------------------------------------------
+
+fn get_with_headers(uri: &str, token: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = Request::get(uri).header("authorization", format!("Bearer {token}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.body(Body::empty()).unwrap()
+}
+
+async fn download_etag(host: &TestHost, uri: &str) -> String {
+    let response = host.send(authed_get(uri, &host.token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.headers()["etag"].to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn resume_only_continues_the_same_version() {
+    let host = TestHost::new().await;
+    let file_id = host.id_of("/Documents", "notes.txt").await;
+    let uri = format!("/api/files/{file_id}/download");
+    let etag = download_etag(&host, &uri).await;
+
+    // Same version: the resume is honoured.
+    let request = get_with_headers(
+        &uri,
+        &host.token,
+        &[("range", "bytes=6-"), ("if-range", &etag)],
+    );
+    let response = host.send(request).await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body_bytes(response).await, b"world");
+
+    // The file changes: the ETag changes, and the old one no longer resumes.
+    std::fs::write(
+        host.shared_path().join("Documents/notes.txt"),
+        b"HELLO THERE!",
+    )
+    .unwrap();
+    let new_etag = download_etag(&host, &uri).await;
+    assert_ne!(etag, new_etag);
+
+    let request = get_with_headers(
+        &uri,
+        &host.token,
+        &[("range", "bytes=6-"), ("if-range", &etag)],
+    );
+    let response = host.send(request).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "stale resume sends it all"
+    );
+    assert_eq!(body_bytes(response).await, b"HELLO THERE!");
+}
+
+#[tokio::test]
+async fn hash_endpoint_matches_the_download() {
+    let host = TestHost::new().await;
+    let file_id = host.id_of("/Documents", "notes.txt").await;
+    let etag = download_etag(&host, &format!("/api/files/{file_id}/download")).await;
+
+    let hash_uri = format!("/api/files/{file_id}/hash");
+    let (status, body) = host.get_json(&hash_uri).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["sha256"],
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    );
+    assert_eq!(body["size"], 11);
+    assert_eq!(body["etag"], etag.as_str());
+
+    // Asking again is answered from the cache, with the same result.
+    let (_, again) = host.get_json(&hash_uri).await;
+    assert_eq!(again, body);
+
+    // After a change, the hash is recomputed.
+    std::fs::write(host.shared_path().join("Documents/notes.txt"), b"changed").unwrap();
+    let (_, changed) = host.get_json(&hash_uri).await;
+    assert_ne!(changed["sha256"], body["sha256"]);
+    assert_eq!(changed["size"], 7);
+}
+
+#[tokio::test]
+async fn hashing_needs_read_permission() {
+    let host = TestHost::new().await;
+    let browser = host.pair_device("Browser", &["browse"]).await;
+    let token = host.log_in(&browser).await.unwrap();
+    let file_id = host.id_of("/Documents", "notes.txt").await;
+
+    let (status, _) = host
+        .send_json_as(
+            Some(&token),
+            "GET",
+            &format!("/api/files/{file_id}/hash"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn file_edited_during_download_cuts_the_connection() {
+    use http_body_util::BodyExt;
+
+    let host = TestHost::new().await;
+    let path = host.shared_path().join("growing.bin");
+    std::fs::write(&path, vec![7u8; 1024 * 1024]).unwrap();
+    let file_id = host.id_of("/", "growing.bin").await;
+
+    let response = host
+        .send(authed_get(
+            &format!("/api/files/{file_id}/download"),
+            &host.token,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+
+    // Receive the first chunk, then edit the file in place.
+    body.frame().await.unwrap().unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, b"appended").unwrap();
+
+    let rest = body.collect().await;
+    assert!(rest.is_err(), "the download must not finish cleanly");
+}
+
+#[tokio::test]
+async fn concurrent_downloads_are_limited_per_device() {
+    let host = TestHost::with_config(riftview_api::config::Config {
+        auth_rate_limit_per_minute: 1000,
+        max_downloads_per_device: 1,
+        ..Default::default()
+    })
+    .await;
+    let file_id = host.id_of("/Documents", "notes.txt").await;
+    let uri = format!("/api/files/{file_id}/download");
+
+    // The first download is still open (its body hasn't been read)…
+    let first = host.send(authed_get(&uri, &host.token)).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // …so a second one is refused, and hashing counts too.
+    let second = host.send(authed_get(&uri, &host.token)).await;
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let (status, body) = host.get_json(&format!("/api/files/{file_id}/hash")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"]["code"], "too_many_requests");
+
+    // Finishing the first download frees the slot.
+    assert_eq!(body_bytes(first).await, b"hello world");
+    let third = host.send(authed_get(&uri, &host.token)).await;
+    assert_eq!(third.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn concurrent_downloads_are_limited_in_total() {
+    let host = TestHost::with_config(riftview_api::config::Config {
+        auth_rate_limit_per_minute: 1000,
+        max_concurrent_downloads: 1,
+        ..Default::default()
+    })
+    .await;
+    let other = host.pair_device("Other", &["browse", "read"]).await;
+    let other_token = host.log_in(&other).await.unwrap();
+    let file_id = host.id_of("/Documents", "notes.txt").await;
+    let uri = format!("/api/files/{file_id}/download");
+
+    let first = host.send(authed_get(&uri, &host.token)).await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let from_other_device = host.send(authed_get(&uri, &other_token)).await;
+    assert_eq!(from_other_device.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    drop(first); // E.g. the phone disconnected.
+    let retry = host.send(authed_get(&uri, &other_token)).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn five_gigabyte_file_ranges_work() {
+    let host = TestHost::new().await;
+    let size: u64 = 5 * 1024 * 1024 * 1024;
+
+    // A sparse file: 5 GiB long but takes almost no disk space. Reads
+    // return zeros except for the marker we write near the end.
+    let path = host.shared_path().join("huge.bin");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(size).unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&file, b"END!", size - 4).unwrap();
+    drop(file);
+
+    let file_id = host.id_of("/", "huge.bin").await;
+    let uri = format!("/api/files/{file_id}/download");
+
+    // Whole-file request: headers only (we don't read 5 GiB in a test).
+    let response = host.send(authed_get(&uri, &host.token)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-length"], size.to_string());
+    drop(response);
+
+    // The last 1 KiB, as a resume from just before the end would ask.
+    let start = size - 1024;
+    let response = host
+        .send(range_request(&uri, &format!("bytes={start}-"), &host.token))
+        .await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers()["content-range"],
+        format!("bytes {start}-{}/{size}", size - 1)
+    );
+    let tail = body_bytes(response).await;
+    assert_eq!(tail.len(), 1024);
+    assert_eq!(&tail[1020..], b"END!");
+    assert!(tail[..1020].iter().all(|&byte| byte == 0));
+}

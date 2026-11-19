@@ -238,6 +238,9 @@ impl TestHost {
             "pairing_id": pairing_id,
             "device_name": attempt.name,
             "device_public_key": crypto::encode_base64(&public_key),
+            "device_type": "phone",
+            "platform": "ios",
+            "app_version": "1.0.0",
             "proof": crypto::encode_base64(&proof),
         });
         let (status, body) = self

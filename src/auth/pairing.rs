@@ -26,13 +26,14 @@ use serde::Serialize;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
 use super::crypto;
-use super::devices::key_fingerprint;
+use super::devices::{
+    DeviceDescription, DeviceType, Platform, key_fingerprint, validate_app_version,
+    validate_device_name,
+};
 use super::protocol::{self, SPAKE2_CLIENT_ID, SPAKE2_HOST_ID};
 
 /// How long a pairing code stays valid.
 pub const PAIRING_LIFETIME: Duration = Duration::from_secs(5 * 60);
-
-const MAX_DEVICE_NAME_LEN: usize = 64;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PairingError {
@@ -63,8 +64,7 @@ pub struct PendingDevice {
     /// ID the device will get if approved (already sent to it in the host
     /// confirmation, so it can't change).
     pub device_id: String,
-    pub name: String,
-    pub public_key: [u8; 32],
+    pub description: DeviceDescription,
 }
 
 #[derive(Debug)]
@@ -117,6 +117,12 @@ pub struct HostView {
     pub device_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_key_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<DeviceType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
 }
@@ -210,12 +216,14 @@ impl PairingManager {
     pub fn complete(
         &self,
         pairing_id: &str,
-        device_name: &str,
-        device_public_key: [u8; 32],
+        mut description: DeviceDescription,
         device_proof: &[u8],
         host_key_hash: &[u8; 32],
     ) -> Result<HostProof, PairingError> {
-        let device_name = validate_device_name(device_name)?;
+        description.name =
+            validate_device_name(&description.name).map_err(PairingError::Invalid)?;
+        description.app_version =
+            validate_app_version(&description.app_version).map_err(PairingError::Invalid)?;
 
         let mut current = self.lock();
         let session = current
@@ -230,8 +238,11 @@ impl PairingManager {
             return Err(PairingError::WrongStep);
         };
 
-        let expected =
-            protocol::client_confirm_message(host_key_hash, &device_public_key, &device_name);
+        let expected = protocol::client_confirm_message(
+            host_key_hash,
+            &description.public_key,
+            &description.name,
+        );
         if !crypto::hmac_sha256_matches(shared_key, &expected, device_proof) {
             // One guess only: any wrong proof ends this session for good.
             session.stage = Stage::Failed;
@@ -240,13 +251,12 @@ impl PairingManager {
 
         let device_id = format!("dev_{}", uuid::Uuid::new_v4().simple());
         let host_message =
-            protocol::host_confirm_message(host_key_hash, &device_public_key, &device_id);
+            protocol::host_confirm_message(host_key_hash, &description.public_key, &device_id);
         let proof = crypto::hmac_sha256(shared_key, &host_message).to_vec();
 
         session.stage = Stage::AwaitingApproval(PendingDevice {
             device_id: device_id.clone(),
-            name: device_name,
-            public_key: device_public_key,
+            description,
         });
         Ok(HostProof { device_id, proof })
     }
@@ -290,27 +300,34 @@ impl PairingManager {
         let current = self.lock();
         let session = current.as_ref()?;
 
-        let (device_name, device_key_fingerprint, device_id) = match &session.stage {
-            Stage::AwaitingApproval(pending) => (
-                Some(pending.name.clone()),
-                Some(key_fingerprint(&pending.public_key)),
-                None,
-            ),
-            Stage::Approved { device_id } => (None, None, Some(device_id.clone())),
-            _ => (None, None, None),
-        };
-
-        Some(HostView {
+        let mut view = HostView {
             pairing_id: session.id.clone(),
             stage: stage_name(session),
             expires_in_secs: session
                 .expires_at
                 .saturating_duration_since(Instant::now())
                 .as_secs(),
-            device_name,
-            device_key_fingerprint,
-            device_id,
-        })
+            device_name: None,
+            device_key_fingerprint: None,
+            device_type: None,
+            platform: None,
+            app_version: None,
+            device_id: None,
+        };
+
+        match &session.stage {
+            Stage::AwaitingApproval(pending) => {
+                let description = &pending.description;
+                view.device_name = Some(description.name.clone());
+                view.device_key_fingerprint = Some(key_fingerprint(&description.public_key));
+                view.device_type = Some(description.device_type);
+                view.platform = Some(description.platform);
+                view.app_version = Some(description.app_version.clone());
+            }
+            Stage::Approved { device_id } => view.device_id = Some(device_id.clone()),
+            _ => {}
+        }
+        Some(view)
     }
 
     /// Device, step 5: has the host decided yet?
@@ -355,20 +372,6 @@ fn stage_name(session: &Session) -> &'static str {
     }
 }
 
-fn validate_device_name(name: &str) -> Result<String, PairingError> {
-    let name = name.trim();
-    let is_valid = !name.is_empty()
-        && name.chars().count() <= MAX_DEVICE_NAME_LEN
-        && !name.chars().any(char::is_control);
-
-    if !is_valid {
-        return Err(PairingError::Invalid(
-            "device name must be 1-64 printable characters",
-        ));
-    }
-    Ok(name.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,8 +396,14 @@ mod tests {
         let proof_message =
             protocol::client_confirm_message(seen_host_key_hash, &DEVICE_KEY, "Phone");
         let proof = crypto::hmac_sha256(&shared_key, &proof_message);
-        let host_proof =
-            manager.complete(&pairing_id, "Phone", DEVICE_KEY, &proof, &HOST_KEY_HASH)?;
+        let description = DeviceDescription {
+            name: "Phone".into(),
+            public_key: DEVICE_KEY,
+            device_type: DeviceType::Phone,
+            platform: Platform::Ios,
+            app_version: "1.0.0".into(),
+        };
+        let host_proof = manager.complete(&pairing_id, description, &proof, &HOST_KEY_HASH)?;
         Ok((pairing_id, shared_key, host_proof))
     }
 
@@ -409,6 +418,7 @@ mod tests {
         let view = manager.host_view().unwrap();
         assert_eq!(view.stage, "awaiting_approval");
         assert_eq!(view.device_name.as_deref(), Some("Phone"));
+        assert_eq!(view.platform, Some(Platform::Ios));
 
         let expected =
             protocol::host_confirm_message(&HOST_KEY_HASH, &DEVICE_KEY, &host_proof.device_id);

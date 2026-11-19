@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::metadata::{Entry, EntryKind};
 use super::roots::Share;
-use super::{FsError, RelPath, run_blocking};
+use super::{FsError, RelPath, StopSignal, run_blocking_stoppable};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -56,23 +56,35 @@ pub struct DirListing {
 }
 
 /// List one folder. Folders are always listed before files.
+///
+/// If the request is abandoned (the device goes back or disconnects, or the
+/// request times out), reading stops within one entry instead of carrying
+/// on through the whole folder.
 pub async fn list_dir(
     share: Share,
     path: RelPath,
     options: ListOptions,
 ) -> Result<DirListing, FsError> {
-    run_blocking(move || list_dir_blocking(&share, &path, &options)).await
+    run_blocking_stoppable(move |stop| list_dir_blocking(&share, &path, &options, stop)).await
 }
 
 fn list_dir_blocking(
     share: &Share,
     path: &RelPath,
     options: &ListOptions,
+    stop: &StopSignal,
 ) -> Result<DirListing, FsError> {
     let dir = share.open_dir(path)?;
     let mut entries = Vec::new();
 
     for (count_so_far, dir_entry) in dir.entries()?.enumerate() {
+        if stop.should_stop() {
+            tracing::debug!(
+                entries_read = count_so_far,
+                "folder listing abandoned; stopped early"
+            );
+            return Err(FsError::Abandoned);
+        }
         if count_so_far >= options.max_entries {
             return Err(FsError::TooManyEntries(options.max_entries));
         }
@@ -108,6 +120,10 @@ fn list_dir_blocking(
         }
     }
 
+    if stop.should_stop() {
+        tracing::debug!("folder listing abandoned before sorting");
+        return Err(FsError::Abandoned);
+    }
     sort_entries(&mut entries, options.sort, options.order);
 
     let total = entries.len();

@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use ed25519_dalek::{Signer, SigningKey};
 use riftview_api::auth::{crypto, protocol};
 use riftview_api::config::Config;
+use riftview_api::state::AppState;
 use serde_json::json;
 
 use common::{FULL_ACCESS, PairingAttempt, TestHost};
@@ -376,4 +377,92 @@ async fn pairing_and_login_are_rate_limited() {
     // Logged-in routes are not affected.
     let (status, _) = host.get_json("/api/shares").await;
     assert_eq!(status, StatusCode::OK);
+}
+
+// --- Device details and the database ----------------------------------------
+
+#[tokio::test]
+async fn device_details_alias_and_logins_are_recorded() {
+    let host = TestHost::new().await;
+    let device_uri = format!("/admin/devices/{}", host.device.id);
+
+    // What the app reported at pairing (see the reference client), plus the
+    // login TestHost already made.
+    let (_, list) = host.admin_json("GET", "/admin/devices", None).await;
+    let device = &list["devices"][0];
+    assert_eq!(device["device_type"], "phone");
+    assert_eq!(device["platform"], "ios");
+    assert_eq!(device["app_version"], "1.0.0");
+    assert_eq!(device["key_version"], 1);
+    assert!(device["last_connected_at_ms"].is_u64());
+
+    // The host user renames it; the device sees the new name.
+    let rename = json!({ "custom_alias": "Work phone" });
+    let (status, _) = host.admin_json("PATCH", &device_uri, Some(rename)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, me) = host.get_json("/api/devices/me").await;
+    assert_eq!(me["name"], "Work phone");
+
+    // An invalid alias is refused; an empty one removes the alias.
+    let bad = json!({ "custom_alias": "bad\nname" });
+    let (status, _) = host.admin_json("PATCH", &device_uri, Some(bad)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let clear = json!({ "custom_alias": "" });
+    host.admin_json("PATCH", &device_uri, Some(clear)).await;
+    let (_, me) = host.get_json("/api/devices/me").await;
+    assert_eq!(me["name"], "Test Phone");
+
+    // Logging in with a newer app version updates it.
+    let (challenge_id, nonce) = host.get_challenge(&host.device.id).await;
+    let message = protocol::login_message(&host.host_key_hash(), &host.device.id, &nonce);
+    let login = json!({
+        "challenge_id": challenge_id,
+        "signature": crypto::encode_base64(&host.device.key.sign(&message).to_bytes()),
+        "app_version": "1.1.0",
+    });
+    let (status, _) = host
+        .send_json_as(None, "POST", "/api/auth/session", Some(login))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list) = host.admin_json("GET", "/admin/devices", None).await;
+    assert_eq!(list["devices"][0]["app_version"], "1.1.0");
+}
+
+#[tokio::test]
+async fn pairing_requires_valid_device_details() {
+    let host = TestHost::new().await;
+    host.start_pairing().await;
+
+    // An unknown platform is rejected before any pairing state changes.
+    let request = json!({
+        "pairing_id": "pair_x",
+        "device_name": "Phone",
+        "device_public_key": crypto::encode_base64(&[1u8; 32]),
+        "device_type": "phone",
+        "platform": "toaster",
+        "app_version": "1.0.0",
+        "proof": crypto::encode_base64(&[0u8; 32]),
+    });
+    let (status, _) = host
+        .send_json_as(None, "POST", "/api/pairing/complete", Some(request))
+        .await;
+    assert!(status.is_client_error(), "got {status}");
+}
+
+#[tokio::test]
+async fn devices_and_shares_survive_a_restart() {
+    let host = TestHost::new().await;
+
+    // Start a second server on the same data folder, as after a reboot.
+    let config = host.state.config().clone();
+    let restarted = AppState::load(config, host.data_dir.path().to_path_buf()).unwrap();
+
+    let devices = restarted.devices().read().await;
+    let device = devices.get_active(&host.device.id).expect("device lost");
+    assert_eq!(device.name, "Test Phone");
+    assert_eq!(device.permissions.len(), FULL_ACCESS.len());
+    drop(devices);
+
+    let share = restarted.share(&host.share_id).await.expect("share lost");
+    assert_eq!(share.name, "Test");
 }

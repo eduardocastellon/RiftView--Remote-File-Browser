@@ -7,14 +7,17 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::admin::token::AdminToken;
-use crate::auth::devices::{DeviceError, DeviceStore};
+use crate::auth::devices::DeviceStore;
 use crate::auth::pairing::PairingManager;
 use crate::auth::rate_limit::RateLimiter;
 use crate::auth::sessions::SessionManager;
 use crate::config::Config;
+use crate::database::{Database, DatabaseError};
 use crate::error::AppError;
-use crate::filesystem::roots::{Share, ShareError, ShareStore};
+use crate::filesystem::roots::{Share, ShareStore};
 use crate::tls::{HostIdentity, TlsError};
+use crate::transfers::hashing::HashCache;
+use crate::transfers::limits::DownloadLimiter;
 
 /// Shared application state. Cloning is cheap: every clone points at the
 /// same data.
@@ -31,14 +34,14 @@ struct Inner {
     pairing: PairingManager,
     sessions: SessionManager,
     auth_rate_limiter: RateLimiter,
+    download_limiter: DownloadLimiter,
+    hash_cache: HashCache,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     #[error(transparent)]
-    Shares(#[from] ShareError),
-    #[error(transparent)]
-    Devices(#[from] DeviceError),
+    Database(#[from] DatabaseError),
     #[error(transparent)]
     Tls(#[from] TlsError),
     #[error("admin token: {0}")]
@@ -48,12 +51,17 @@ pub enum StateError {
 impl AppState {
     /// Load (or create on first run) everything kept in the data folder.
     pub fn load(config: Config, data_dir: PathBuf) -> Result<Self, StateError> {
-        let shares = ShareStore::load(&data_dir)?;
-        let devices = DeviceStore::load(&data_dir)?;
+        let database = Database::open(&data_dir)?;
+        let shares = ShareStore::load(database.clone(), &data_dir)?;
+        let devices = DeviceStore::load(database)?;
         let identity = HostIdentity::load_or_create(&data_dir)?;
         let admin_token = AdminToken::load_or_create(&data_dir)?;
         let sessions = SessionManager::new(Duration::from_secs(config.session_lifetime_secs));
         let auth_rate_limiter = RateLimiter::new(config.auth_rate_limit_per_minute);
+        let download_limiter = DownloadLimiter::new(
+            config.max_concurrent_downloads,
+            config.max_downloads_per_device,
+        );
 
         Ok(Self(Arc::new(Inner {
             config,
@@ -65,6 +73,8 @@ impl AppState {
             pairing: PairingManager::default(),
             sessions,
             auth_rate_limiter,
+            download_limiter,
+            hash_cache: HashCache::default(),
         })))
     }
 
@@ -102,6 +112,14 @@ impl AppState {
 
     pub fn auth_rate_limiter(&self) -> &RateLimiter {
         &self.0.auth_rate_limiter
+    }
+
+    pub fn download_limiter(&self) -> &DownloadLimiter {
+        &self.0.download_limiter
+    }
+
+    pub fn hash_cache(&self) -> &HashCache {
+        &self.0.hash_cache
     }
 
     /// A copy of one share's details, or a 404 error if it doesn't exist.

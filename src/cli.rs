@@ -131,6 +131,12 @@ pub fn pair() -> CliResult {
         waiting["device_name"].as_str().unwrap_or("Unknown device")
     );
     println!(
+        "Device:          {} {}, app {}",
+        waiting["platform"].as_str().unwrap_or("?"),
+        waiting["device_type"].as_str().unwrap_or("?"),
+        waiting["app_version"].as_str().unwrap_or("?"),
+    );
+    println!(
         "Key fingerprint: {}",
         waiting["device_key_fingerprint"].as_str().unwrap_or("?")
     );
@@ -240,23 +246,90 @@ pub fn list_devices() -> CliResult {
         return Ok(());
     }
     for device in devices {
-        let status = if device["revoked_at_ms"].is_null() {
-            "active"
-        } else {
-            "REVOKED"
-        };
-        let permissions: Vec<&str> = device["permissions"]
-            .as_array()
-            .map(|list| list.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+        print_device(&device);
+    }
+    Ok(())
+}
 
-        println!(
-            "{}  {:<24} {:<8} {}",
-            device["id"].as_str().unwrap_or("?"),
-            device["name"].as_str().unwrap_or("?"),
-            status,
-            permissions.join(","),
-        );
+/// Print one device from `GET /admin/devices` as a short block, e.g.
+///
+/// ```text
+/// dev_3f2a…  Work phone (Lalo's iPhone)  active
+///   ios phone, app 1.4.0 · last connected 2026-11-16 09:12 UTC
+///   permissions: browse, read
+/// ```
+fn print_device(device: &Value) {
+    let own_name = device["name"].as_str().unwrap_or("?");
+    let name = match device["custom_alias"].as_str() {
+        Some(alias) => format!("{alias} ({own_name})"),
+        None => own_name.to_owned(),
+    };
+    let status = if device["revoked_at_ms"].is_null() {
+        "active"
+    } else {
+        "REVOKED"
+    };
+    let last_connected = device["last_connected_at_ms"]
+        .as_u64()
+        .map(format_utc_time)
+        .unwrap_or_else(|| "never".into());
+    let permissions: Vec<&str> = device["permissions"]
+        .as_array()
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    println!("{}  {name}  {status}", device["id"].as_str().unwrap_or("?"));
+    println!(
+        "  {} {}, app {} · last connected {last_connected}",
+        device["platform"].as_str().unwrap_or("?"),
+        device["device_type"].as_str().unwrap_or("?"),
+        device["app_version"].as_str().unwrap_or("?"),
+    );
+    println!("  permissions: {}", permissions.join(", "));
+}
+
+/// Unix epoch milliseconds as `YYYY-MM-DD HH:MM UTC`.
+fn format_utc_time(epoch_ms: u64) -> String {
+    let total_minutes = epoch_ms / 60_000;
+    let (days, minute_of_day) = (total_minutes / 1440, total_minutes % 1440);
+    let (year, month, day) = civil_date_from_days(days as i64);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        minute_of_day / 60,
+        minute_of_day % 60
+    )
+}
+
+/// Days since 1970-01-01 to a calendar date (Howard Hinnant's
+/// `civil_from_days` algorithm), so we don't need a date library for one
+/// line of output.
+fn civil_date_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468; // count from 0000-03-01
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153; // 0 = March
+    let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    } as u32;
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// Set (or with `None`, remove) the host user's name for a device.
+pub fn rename_device(device_id: &str, alias: Option<&str>) -> CliResult {
+    let client = AdminClient::connect()?;
+    let body = json!({ "custom_alias": alias.unwrap_or("") });
+    expect_success(client.send("PATCH", &format!("/admin/devices/{device_id}"), Some(body))?)?;
+
+    match alias {
+        Some(alias) => println!("{device_id} is now called \"{alias}\"."),
+        None => println!("Removed the alias of {device_id}."),
     }
     Ok(())
 }
@@ -314,4 +387,16 @@ pub fn remove_share(share_id: &str) -> CliResult {
     expect_success(client.send("DELETE", &format!("/admin/shares/{share_id}"), None)?)?;
     println!("Stopped sharing {share_id}. The folder itself was not changed.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_utc_times() {
+        assert_eq!(format_utc_time(0), "1970-01-01 00:00 UTC");
+        assert_eq!(format_utc_time(951_782_400_000), "2000-02-29 00:00 UTC");
+        assert_eq!(format_utc_time(1_794_821_520_000), "2026-11-16 09:32 UTC");
+    }
 }

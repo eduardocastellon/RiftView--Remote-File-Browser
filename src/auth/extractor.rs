@@ -7,7 +7,7 @@ use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 
-use super::devices::Permission;
+use super::devices::{DeviceType, Permission, Platform};
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -15,7 +15,10 @@ use crate::state::AppState;
 #[derive(Debug, Clone)]
 pub struct AuthenticatedDevice {
     pub id: String,
+    /// The host user's alias if set, otherwise the device's own name.
     pub name: String,
+    pub device_type: DeviceType,
+    pub platform: Platform,
     pub permissions: BTreeSet<Permission>,
     /// The bearer token used, so the device can log itself out.
     pub token: String,
@@ -51,7 +54,9 @@ impl FromRequestParts<AppState> for AuthenticatedDevice {
 
         Ok(Self {
             id: device.id.clone(),
-            name: device.name.clone(),
+            name: device.display_name().to_owned(),
+            device_type: device.device_type,
+            platform: device.platform,
             permissions: device.permissions.clone(),
             token: token.to_owned(),
         })

@@ -6,6 +6,7 @@ use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::crypto::{decode_base64, encode_base64};
+use crate::auth::devices::{DeviceDescription, DeviceType, Platform};
 use crate::auth::pairing::DeviceView;
 use crate::error::AppError;
 use crate::state::AppState;
@@ -47,6 +48,12 @@ pub struct CompleteRequest {
     device_name: String,
     /// The device's Ed25519 public key (32 bytes), base64.
     device_public_key: String,
+    /// `phone`, `tablet`, `laptop`, `desktop` or `other`.
+    device_type: DeviceType,
+    /// `ios`, `android`, `macos`, `windows`, `linux` or `other`.
+    platform: Platform,
+    /// The app's version, e.g. `1.4.0`.
+    app_version: String,
     /// HMAC proving the device knows the code, base64.
     proof: String,
 }
@@ -75,14 +82,19 @@ pub async fn complete(
     let proof = decode_base64(&request.proof)
         .ok_or_else(|| AppError::BadRequest("proof must be base64".into()))?;
 
+    let description = DeviceDescription {
+        name: request.device_name,
+        public_key: device_public_key,
+        device_type: request.device_type,
+        platform: request.platform,
+        app_version: request.app_version,
+    };
+
     let identity = state.identity();
-    let host_proof = state.pairing().complete(
-        &request.pairing_id,
-        &request.device_name,
-        device_public_key,
-        &proof,
-        &identity.key_hash,
-    )?;
+    let host_proof =
+        state
+            .pairing()
+            .complete(&request.pairing_id, description, &proof, &identity.key_hash)?;
 
     Ok(Json(CompleteResponse {
         stage: "awaiting_approval",

@@ -1,4 +1,6 @@
-//! Saving and loading small JSON files (there is no database).
+//! Saving and loading small settings files: `config.json`, the admin token
+//! and the certificate. Shares and devices live in the database instead
+//! (see `crate::database`).
 //!
 //! Every save is "atomic": we write the new contents to a temporary file
 //! next to the real one, flush it to disk, then rename it over the real

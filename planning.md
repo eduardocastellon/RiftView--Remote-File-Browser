@@ -8,11 +8,13 @@
 **Serialization:** Serde  
 **TLS:** Rustls  
 **Target Platforms:** Windows, macOS, Linux  
-**Deployment:** Native background service  
-**Database:** None  
+**Deployment:** Native background service (planned, Phase 8; today it runs from a terminal)  
+**Database:** Embedded SQLite (`riftview.db`, no database server)  
 **External Infrastructure:** None required
 
 ---
+
+> **Status (2026-11-19):** Phases 1–5 are built. Phases 6–9 are not started. Each section below says what is built, what is planned, and where the build deliberately differs from the original plan.
 
 # 1. Backend Overview
 
@@ -75,6 +77,8 @@ The Rust backend is responsible for:
 | Serde | JSON serialization |
 | Tokio FS | Asynchronous filesystem operations |
 | Rust standard library | Path resolution and filesystem utilities |
+| cap-std | Handle-based filesystem access that cannot escape a shared root |
+| SQLite (rusqlite, bundled) | Embedded database for shares, devices and permissions |
 | Rustls | TLS |
 | Tracing | Structured logging |
 | UUID | Unique resource identifiers |
@@ -102,170 +106,190 @@ The backend should use Axum primarily as its HTTP interface rather than putting 
 
 ## 3.1 Component Architecture
 
+Two listeners run side by side. Devices only ever reach the HTTPS one; the admin API is for the host user on the same computer.
+
 ```text
-                 HTTP CLIENT
-                      |
-                      |
-                   HTTPS
-                      |
-                      v
-             +----------------+
-             |  Axum Server   |
-             +----------------+
-                      |
-                      v
-             +----------------+
-             | Middleware     |
-             | - Authentication
-             | - Rate Limiting |
-             | - Request Limits|
-             +----------------+
-                      |
-                      v
-             +----------------+
-             | Authorization  |
-             | Permission      |
-             | Enforcement     |
-             +----------------+
-                      |
-           +----------+----------+
-           |          |          |
-           v          v          v
-      +---------+ +---------+ +----------+
-      | Filesystem| |Transfers| | Devices  |
-      | Module    | | Module  | | Module   |
-      +---------+ +---------+ +----------+
-           |          |          |
-           +----------+----------+
-                      |
-                      v
-             +----------------+
-             | Operating      |
-             | System         |
-             | Filesystem     |
-             +----------------+
+   PAIRED DEVICE (phone app)                HOST USER (same computer)
+            |                                        |
+   HTTPS, pinned self-signed cert           plain HTTP, loopback only
+   0.0.0.0:7878                             127.0.0.1:7879 + admin token
+            |                                        |
+            v                                        v
+   +--------------------+                  +--------------------+
+   |  Device API (api/) |                  |  Admin API (admin/)|
+   +--------------------+                  |  + CLI (cli.rs)    |
+   | Middleware:        |                  +--------------------+
+   | - request timeout  |                            |
+   | - body size limit  |                            |
+   | - per-IP rate limit|                            |
+   |   (pairing/login)  |                            |
+   +--------------------+                            |
+            |                                        |
+            v                                        |
+   +--------------------+                            |
+   | Login + permission |                            |
+   | check per request  |                            |
+   | (auth/extractor)   |                            |
+   +--------------------+                            |
+            |                                        |
+     +------+---------+--------------+               |
+     |                |              |               |
+     v                v              v               v
+ +-----------+  +-----------+  +--------------------------+
+ | filesystem|  | transfers |  | auth: pairing, sessions, |
+ | (cap-std) |  | stream,   |  | devices & permissions    |
+ |           |  | ETag, hash|  | filesystem/roots: shares |
+ +-----------+  +-----------+  +--------------------------+
+     |                |                      |
+     v                v                      v
+ +--------------------------+       +-------------------+
+ | Operating system         |       | SQLite            |
+ | filesystem (shares only) |       | riftview.db       |
+ +--------------------------+       +-------------------+
 ```
 
 ## 3.2 Module Responsibilities
 
-### API Module
+### API Module (`api/`), built
 
-Responsible for:
-- HTTP routing.
+- HTTP routing for devices.
 - Request validation.
 - Response serialization.
 - HTTP status codes.
-- Error translation.
-- Request cancellation.
+- Error translation (`error.rs`): JSON errors that never contain host paths.
+- Request cancellation: abandoned folder listings, downloads and hash requests stop their work.
 
-### Authentication Module
+### Admin Module (`admin/`, `cli.rs`), built (not in the original plan)
 
-Responsible for:
-- Device pairing.
-- Public-key identity management.
-- Credential verification.
-- Session management.
+- Host-only API on loopback, protected by an admin token file.
+- Shares: create, rename, toggle writable, remove.
+- Devices: list, set permissions, set alias, revoke.
+- Pairing: start, show status, approve, reject.
+- The `riftview-api` CLI commands call this API.
+
+### Authentication and Authorization Module (`auth/`), built
+
+The original plan had separate authentication and authorization modules; they are one module.
+
+- Device pairing (SPAKE2 six-digit code + host approval).
+- Public-key identity management (Ed25519).
+- Credential verification (signed login challenges).
+- Session management (1-hour tokens).
 - Device revocation.
+- Device permissions, checked on every request by the `AuthenticatedDevice` extractor.
+- Per-IP rate limiting for pairing and login.
 
-### Authorization Module
+Planned: per-share permissions for each device.
 
-Responsible for:
-- Shared-root permissions.
-- Device-specific access rules.
-- Read and write permissions.
-- Destructive operation permissions.
-- Transfer authorization.
+### Filesystem Module (`filesystem/`), partly built
 
-### Filesystem Module
-
-Responsible for:
-- Directory browsing.
+Built:
+- Directory browsing (paged, sorted, stoppable).
 - File metadata.
-- Safe path resolution.
+- Safe path resolution (`cap-std`).
 - File opening.
-- File creation.
-- Rename and move operations.
-- Deletion.
-- Directory creation.
+- Shares (`roots.rs`, stored in SQLite).
+- Opaque file IDs.
 
-### Transfer Module
+Planned (Phase 7): file creation, rename and move, deletion, directory creation.
 
-Responsible for:
-- Transfer initialization.
-- Chunk management.
-- File streaming.
-- Transfer progress.
-- Integrity verification.
-- Resumability.
-- Temporary file management.
-- Transfer cancellation.
+### Transfer Module (`transfers/`), downloads built
 
-### Platform Module
+Built:
+- File streaming in bounded chunks.
+- File versions (`ETag`) and resume safety.
+- Integrity verification (SHA-256 + in-memory cache).
+- Concurrent download limits.
+- Transfer cancellation (download stops when the device disconnects).
 
-Responsible for:
-- OS-specific behavior.
-- Service installation.
-- Startup integration.
-- Platform-specific filesystem permissions.
-- Application data directories.
+Planned (Phase 6): transfer initialization, chunk management, upload progress, resumable uploads, temporary file management.
+
+### Database Module (`database/`), built (not in the original plan)
+
+- SQLite connection with WAL mode and foreign keys.
+- Numbered schema migrations tracked with `PRAGMA user_version`.
+
+### Storage Module (`storage/`), built
+
+- Atomic writes for `config.json`, `admin_token` and the TLS certificate.
+
+### Platform Module (`platform/`), partly built
+
+Built: application data directories and owner-only file permissions per OS.
+
+Planned (Phase 8): service installation, startup integration, other platform-specific filesystem permissions.
 
 ---
 
-# 4. Recommended Project Structure
+# 4. Project Structure
+
+Current layout. Entries marked *(planned)* don't exist yet.
 
 ```text
-file-host/
+riftview-api/
 |
 ├── Cargo.toml
 ├── Cargo.lock
 |
 ├── src/
-|   ├── main.rs
-|   ├── server.rs
-|   ├── config.rs
-|   ├── state.rs
-|   ├── error.rs
+|   ├── main.rs            command-line entry point
+|   ├── lib.rs
+|   ├── cli.rs             pair, share, devices, rename, revoke, info commands
+|   ├── server.rs          listeners and middleware
+|   ├── config.rs          config.json
+|   ├── state.rs           shared application state
+|   ├── error.rs           errors as clients see them
+|   ├── tls.rs             self-signed certificate and pin
 |   |
-|   ├── api/
+|   ├── api/               device API (HTTPS), thin handlers
 |   |   ├── mod.rs
 |   |   ├── health.rs
-|   |   ├── files.rs
+|   |   ├── pairing.rs
+|   |   ├── auth.rs
+|   |   ├── shares.rs
+|   |   └── files.rs       browse, metadata, download, hash
+|   |
+|   ├── admin/             host-only admin API (loopback + admin token)
+|   |   ├── mod.rs
+|   |   ├── token.rs
 |   |   ├── shares.rs
 |   |   ├── devices.rs
-|   |   └── transfers.rs
+|   |   └── pairing.rs
 |   |
-|   ├── auth/
+|   ├── auth/              authentication and authorization
 |   |   ├── mod.rs
+|   |   ├── protocol.rs    SPAKE2 identities and transcript labels
+|   |   ├── crypto.rs
 |   |   ├── pairing.rs
-|   |   ├── credentials.rs
 |   |   ├── sessions.rs
-|   |   └── verification.rs
+|   |   ├── devices.rs     devices and permissions (SQLite)
+|   |   ├── extractor.rs   per-request login and permission checks
+|   |   └── rate_limit.rs
 |   |
-|   ├── authorization/
-|   |   ├── mod.rs
-|   |   ├── permissions.rs
-|   |   └── policies.rs
-|   |
-|   ├── filesystem/
+|   ├── filesystem/        no HTTP knowledge
 |   |   ├── mod.rs
 |   |   ├── browser.rs
 |   |   ├── resolver.rs
 |   |   ├── metadata.rs
+|   |   ├── ids.rs         opaque file IDs
 |   |   ├── operations.rs
-|   |   └── roots.rs
+|   |   └── roots.rs       shares (SQLite)
 |   |
 |   ├── transfers/
 |   |   ├── mod.rs
-|   |   ├── manager.rs
-|   |   ├── upload.rs
-|   |   ├── download.rs
-|   |   ├── chunks.rs
-|   |   └── persistence.rs
+|   |   ├── stream.rs      streaming download body
+|   |   ├── version.rs     file versions / ETags
+|   |   ├── hashing.rs     SHA-256 + cache
+|   |   ├── limits.rs      concurrent download limits
+|   |   └── upload.rs, chunks.rs, persistence.rs   (planned, Phase 6)
 |   |
-|   ├── storage/
-|   |   ├── mod.rs
-|   |   ├── config_store.rs
-|   |   └── state_store.rs
+|   ├── database/
+|   |   ├── mod.rs         connection, pragmas, migrations
+|   |   └── migrations/
+|   |       └── 001_devices_and_shares.sql
+|   |
+|   ├── storage/           atomic writes for config, admin token, certificate
+|   |   └── mod.rs
 |   |
 |   └── platform/
 |       ├── mod.rs
@@ -273,13 +297,17 @@ file-host/
 |       ├── macos.rs
 |       └── linux.rs
 |
-└── tests/
-    ├── api_tests.rs
-    ├── filesystem_tests.rs
-    ├── security_tests.rs
-    ├── auth_tests.rs
-    └── transfer_tests.rs
+├── tests/
+|   ├── common/mod.rs      reference client used by the tests
+|   ├── api_tests.rs
+|   ├── auth_tests.rs
+|   └── security_tests.rs
+|
+└── docs/
+    └── auth-protocol.md
 ```
+
+Authorization lives in `auth/` (`devices.rs` holds permissions, `extractor.rs` enforces them) rather than a separate `authorization/` module.
 
 The exact module boundaries can evolve during development. Avoid introducing abstractions before they provide a practical benefit.
 
@@ -287,55 +315,66 @@ The exact module boundaries can evolve during development. Avoid introducing abs
 
 # 5. HTTP API Design
 
-The backend exposes a REST API over HTTPS.
+The backend exposes two APIs:
 
-All endpoints must authenticate the requesting device and enforce the appropriate authorization policy.
+- the **device API**, over HTTPS, used by paired devices;
+- the **admin API**, over loopback HTTP with an admin token, used by the host user's CLI.
+
+Every device API endpoint except health, version, pairing and login requires a logged-in device, and checks that device's permissions. Errors are JSON: `{"error":{"code":"…","message":"…"}}`.
+
+**Change from the original plan:** device management and share management moved from the device API to the admin API. A phone should not be able to list or revoke other devices, or decide which folders are shared.
 
 ## 5.1 Health and Host Information
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/health` | Health check |
-| GET | `/api/host` | Retrieve host information |
-| GET | `/api/version` | Retrieve backend version |
+| Method | Endpoint | Access | Status |
+|---|---|---|---|
+| GET | `/api/health` | public | Built |
+| GET | `/api/version` | public | Built |
+| GET | `/api/host` | logged in | Built |
 
-The health endpoint should return minimal information and must not expose sensitive host details to unauthenticated clients.
+The health endpoint returns only `{"status":"ok"}` and exposes no host details.
 
-## 5.2 Device Management
+## 5.2 Pairing, Login and Devices
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/pairing/initiate` | Initiate pairing |
-| POST | `/api/pairing/complete` | Complete pairing |
-| GET | `/api/devices` | List trusted devices |
-| GET | `/api/devices/{id}` | Retrieve device information |
-| DELETE | `/api/devices/{id}` | Revoke device access |
+| Method | Endpoint | Access | Status |
+|---|---|---|---|
+| POST | `/api/pairing/initiate` | public, rate-limited | Built |
+| POST | `/api/pairing/complete` | public, rate-limited | Built |
+| GET | `/api/pairing/{id}` | public, rate-limited | Built: poll until the host approves |
+| POST | `/api/auth/challenge` | public, rate-limited | Built |
+| POST | `/api/auth/session` | public, rate-limited | Built: log in |
+| DELETE | `/api/auth/session` | logged in | Built: log out |
+| GET | `/api/devices/me` | logged in | Built |
+
+Not built (by design): `GET /api/devices`, `GET /api/devices/{id}`, `DELETE /api/devices/{id}` on the device API. These are in the admin API (§5.6).
 
 ## 5.3 Shared Directories
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/shares` | List shared roots |
-| POST | `/api/shares` | Register a shared root |
-| GET | `/api/shares/{id}` | Retrieve share information |
-| PATCH | `/api/shares/{id}` | Modify share permissions |
-| DELETE | `/api/shares/{id}` | Remove a shared root |
+| Method | Endpoint | Permission | Status |
+|---|---|---|---|
+| GET | `/api/shares` | `browse` | Built |
+| GET | `/api/shares/{id}` | `browse` | Built |
+
+Not built (by design): `POST`, `PATCH` and `DELETE` on `/api/shares`. Only the host user manages shares, through the admin API (§5.6).
 
 ## 5.4 Filesystem Operations
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/shares/{id}/files` | Browse a directory |
-| GET | `/api/files/{id}` | Retrieve file metadata |
-| GET | `/api/files/{id}/download` | Download a file |
-| POST | `/api/files/{id}/rename` | Rename a file |
-| POST | `/api/files/{id}/move` | Move a file |
-| POST | `/api/shares/{id}/directories` | Create a directory |
-| DELETE | `/api/files/{id}` | Delete a file |
+| Method | Endpoint | Permission | Status |
+|---|---|---|---|
+| GET | `/api/shares/{id}/files?path=&sort=&order=&offset=&limit=` | `browse` | Built |
+| GET | `/api/files/{id}` | `browse` | Built |
+| GET | `/api/files/{id}/download` | `read` | Built: `Range`, `If-Range`, `ETag` |
+| GET | `/api/files/{id}/hash` | `read` | Built: `{sha256, size, etag}` (not in the original plan) |
+| POST | `/api/files/{id}/rename` | `rename` | Planned, Phase 7 |
+| POST | `/api/files/{id}/move` | `move` | Planned, Phase 7 |
+| POST | `/api/shares/{id}/directories` | `upload` | Planned, Phase 7 |
+| DELETE | `/api/files/{id}` | `delete` | Planned, Phase 7 |
 
-File identifiers should resolve to resources within authorized shared roots. Avoid treating arbitrary client-supplied absolute paths as valid resource identifiers.
+File identifiers are an opaque base64url encoding of (share ID, relative path). They are decoded and re-checked on every request, and clients never send host paths.
 
-## 5.5 Transfers
+## 5.5 Transfers (uploads)
+
+Planned, Phase 6.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -345,6 +384,22 @@ File identifiers should resolve to resources within authorized shared roots. Avo
 | GET | `/api/transfers/{id}/chunks/{index}` | Retrieve chunk |
 | POST | `/api/transfers/{id}/complete` | Finalize transfer |
 | DELETE | `/api/transfers/{id}` | Cancel transfer |
+
+## 5.6 Admin API (host only)
+
+Built. Listens on `127.0.0.1:7879` (must be loopback) and needs `Authorization: Bearer <admin_token>`.
+
+| Method | Endpoint | Purpose | CLI |
+|---|---|---|---|
+| GET | `/admin/host` | Host info and certificate pin | `info` |
+| GET, POST | `/admin/shares` | List / add shares | `share list`, `share add` |
+| GET, PATCH, DELETE | `/admin/shares/{id}` | Show / rename or toggle writable / remove | `share remove` (no CLI for PATCH yet) |
+| GET | `/admin/devices` | List devices | `devices` |
+| PATCH | `/admin/devices/{id}` | Set permissions or alias | `rename` |
+| DELETE | `/admin/devices/{id}` | Revoke | `revoke` |
+| GET, POST, DELETE | `/admin/pairing` | Pairing status / start / cancel | `pair` |
+| POST | `/admin/pairing/approve` | Approve with permissions | `pair` |
+| POST | `/admin/pairing/reject` | Reject | `pair` |
 
 ---
 
@@ -418,6 +473,15 @@ Directory browsing should support:
 
 Do not recursively scan entire directory trees during ordinary browsing.
 
+**As built:**
+- Listings go through `cap-std` on a background thread. The response also carries `total`, `offset`, `limit` and an opaque `id` per entry.
+- Sort by `name`, `size` or `modified`, ascending or descending. Folders always come first.
+- Page size defaults to 200, with a configurable maximum (`max_list_limit`, 1000).
+- Folders with more than `max_dir_entries` (100,000) entries are refused with `409`.
+- Entries that can't be read, names that aren't UTF-8, and symlinks pointing outside the share are skipped.
+- If the request is abandoned (the device disconnects or the request times out), the scan stops within one entry.
+- Not built: a short-lived listing cache. Each page request re-reads and re-sorts the whole folder.
+
 ## 6.3 Path Resolution
 
 Path resolution is a security-critical component.
@@ -437,6 +501,8 @@ Where equivalent guarantees are not available through a portable abstraction, is
 
 The filesystem module should expose safe operations rather than allowing API handlers to construct arbitrary filesystem paths.
 
+**As built:** every access goes through a `cap_std::fs::Dir` handle on the share root, so the OS refuses lookups that leave it (`..`, absolute paths, escaping symlinks). Relative paths are parsed strictly: `..`, backslashes, NUL bytes and drive prefixes are rejected, not cleaned up. Files are type-checked after opening, so there's no gap between checking and opening. Named pipes are opened non-blocking and rejected. Shares can't overlap each other or contain the data folder.
+
 ## 6.4 File Metadata
 
 Retrieve metadata without reading file contents.
@@ -455,6 +521,8 @@ Avoid calculating hashes for every file during directory browsing. Hash files on
 ---
 
 # 7. Authentication and Device Trust
+
+The exact wire protocol is in `docs/auth-protocol.md`; client requirements are in `mobile_app_reqs.md`.
 
 ## 7.1 Pairing Workflow
 
@@ -478,6 +546,14 @@ Pairing codes must be:
 
 A six-digit code provides limited entropy, so it must never serve as a long-term authentication credential.
 
+**As built:**
+1. `riftview-api pair` creates a six-digit code, valid for 5 minutes, and shows it only in the host's terminal. It is never logged.
+2. The device and host run **SPAKE2** (Ed25519 group, `spake2` crate) with the code as the password. The code itself never crosses the network, so someone eavesdropping can't recover it offline.
+3. The device proves it knew the code with an HMAC over its Ed25519 public key, its name and the certificate pin it saw. This binds the pairing to that exact certificate, which defeats a man-in-the-middle.
+4. **One guess per code:** a wrong proof burns the code. Pairing and login routes share a per-IP rate limit (20 per minute).
+5. The host user approves (read-only or full access) or rejects in the terminal. The device polls `GET /api/pairing/{id}`.
+6. On approval, the host returns the new device ID and its own HMAC proof, and the device stores the certificate pin.
+
 ## 7.2 Cryptographic Identity
 
 Each trusted device should possess a public/private key pair.
@@ -494,6 +570,14 @@ The desktop stores:
 
 Use an established authentication protocol or a well-reviewed cryptographic library. Do not invent a custom challenge-response protocol.
 
+**As built:** Ed25519 keys (`ed25519-dalek`). In addition to the fields above, the `devices` table in SQLite stores:
+- a host-chosen alias
+- the key version (always 1 for now)
+- device type, platform and app version
+- the last connection time
+
+Revoked devices keep their row, with `revoked_at_ms` set. See `data_planning.md`.
+
 ## 7.3 Session Management
 
 The backend may issue short-lived sessions after verifying device identity.
@@ -505,25 +589,35 @@ Sessions should:
 - Carry no more authority than the device's permissions.
 - Be protected against replay.
 
+**As built:**
+- The device asks for a random challenge (single-use, valid for 60 seconds) and signs it with its Ed25519 key.
+- The signature also covers the device ID and the pinned certificate hash.
+- In return the device gets a bearer token that lasts 1 hour (`session_lifetime_secs`). Tokens are kept in memory only, so a restart logs devices out.
+- Revoking a device ends its sessions immediately.
+- Permissions are re-read on every request, so changes apply right away.
+
 ## 7.4 Authorization
 
 Authentication and authorization are separate responsibilities.
 
 A successfully authenticated device must not automatically have unrestricted access.
 
-Example permission model:
-
-| Permission | Description |
-|---|---|
-| Browse | List authorized directories |
-| Read | Download files |
-| Upload | Create new files |
-| Rename | Rename files |
-| Move | Move files |
-| Delete | Delete files |
-| Manage Shares | Modify shared roots |
+| Permission | Description | Status |
+|---|---|---|
+| Browse | List shares and folders, see file details | Built, enforced |
+| Read | Download files and get their SHA-256 | Built, enforced |
+| Upload | Create new files and folders | Stored and checked; endpoints planned (Phases 6–7) |
+| Rename | Rename files | Stored and checked; endpoints planned (Phase 7) |
+| Move | Move files | Stored and checked; endpoints planned (Phase 7) |
+| Delete | Delete files | Stored and checked; endpoints planned (Phase 7) |
+| Manage Shares | Modify shared roots | **Not a device permission.** Only the host user can manage shares (admin API). |
 
 Permissions should be enforced by the backend for every operation.
+
+**As built:**
+- Permissions are stored one row per permission (`device_permissions`), and apply to all shares.
+- Each share also has a `writable` flag (off by default). Upload, rename, move and delete only work when the device has the permission **and** the share is writable.
+- Pairing approval offers two presets: read-only (`browse`, `read`) and full access (all six).
 
 ---
 
@@ -559,6 +653,13 @@ A download should follow this sequence:
 Do not load the entire file into a `Vec<u8>`.
 
 Use bounded buffers and streaming response bodies.
+
+**As built** (`api/files.rs`, `transfers/stream.rs`):
+- The file is opened through `cap-std` and streamed in 64 KiB chunks from one open handle, so memory stays flat regardless of file size.
+- One `Range` per request (`bytes=A-B`, `A-`, `-N`). Several ranges, or a malformed header, get the whole file. A start past the end gets `416` with the real size.
+- Every response carries an `ETag` (a hash of size, modified time, inode and change time). `If-Range` with a stale ETag gets the whole file (`200`) instead of a mismatched part.
+- If the file is edited in place while streaming, the connection is cut before the last bytes, so the client never sees a complete-looking corrupted file. If the file is replaced (rename-over), the original is still served consistently.
+- When the client disconnects, the stream is dropped and reading stops.
 
 ## 8.3 Upload Implementation
 
@@ -614,6 +715,8 @@ Verify:
 
 For downloads, account for the possibility that the source file changes during a transfer. Use a stable file handle and a clearly defined source-consistency strategy.
 
+**As built (downloads):** `GET /api/files/{id}/hash` returns the SHA-256 of the whole file, plus its size and ETag. Hashing streams the file with a 1 MiB buffer and stops if the request is abandoned. It is exempt from the request timeout. Results are cached in memory (up to 10,000, least recently used evicted) until the file's version changes. If the file changes during hashing, the request returns `409`. The download stream and ETag above are the source-consistency strategy. Per-chunk upload verification is planned with Phase 6.
+
 For uploads, finalize using an atomic rename where supported, while accounting for platform-specific behavior and destination conflicts.
 
 ## 8.6 Resource Limits
@@ -630,43 +733,66 @@ Implement:
 
 Memory consumption should not increase proportionally to the total size of a file being transferred.
 
+**As built:**
+
+| Limit | Status |
+|---|---|
+| Concurrent downloads, total | Built: `max_concurrent_downloads`, 16 (includes hash requests) |
+| Concurrent downloads, per device | Built: `max_downloads_per_device`, 4 (includes hash requests) |
+| Request timeouts | Built: 30 s until the response starts (`request_timeout_secs`); `/hash` exempt; streaming isn't cut off |
+| Bounded buffering | Built: 64 KiB download chunks, 1 MiB hash buffer |
+| Request body size | Built: 64 KiB (`max_request_body_bytes`) |
+| Upload size, chunk size, active transfers, expiration | Planned, Phase 6 |
+
+Over-limit requests get `429 too_many_requests`.
+
 ---
 
 # 9. Persistent State
 
-No database server is required.
+No database server is required. Relational data lives in an embedded SQLite database (`riftview.db`), and a few small settings files sit beside it. Column-by-column details are in [data_planning.md](data_planning.md).
 
-The backend can maintain small local configuration and state files.
-
-Example:
+Data folder (`~/Library/Application Support/RiftView/` on macOS, or `RIFTVIEW_DATA_DIR`):
 
 ```text
-application-data/
+RiftView/
 |
-├── config.json
-├── shared_directories.json
-├── trusted_devices.json
+├── riftview.db           SQLite: shares, devices, device_permissions
+├── riftview.db-wal       SQLite write-ahead log (while the server runs)
+├── riftview.db-shm
+├── config.json           server settings
+├── admin_token           secret for the host-only admin API
 |
-└── transfers/
-    ├── transfer_001.json
-    └── transfer_002.json
+└── tls/
+    ├── cert.pem          self-signed certificate
+    └── key.pem           its private key
 ```
 
+Database tables (schema in `src/database/migrations/`):
+
+| Table | Holds |
+|---|---|
+| `shares` | Shared folders: ID, name, host path, writable |
+| `devices` | Trusted devices: ID, names, Ed25519 public key, type, platform, app version, timestamps, revocation |
+| `device_permissions` | One row per permission a device has |
+
 Persist:
-- Host configuration.
-- Shared directory definitions.
-- Trusted device public keys.
-- Device permissions.
-- Transfer metadata.
-- Resumable transfer state.
+- Host configuration (`config.json`).
+- Shared directory definitions (SQLite).
+- Trusted device public keys (SQLite).
+- Device permissions (SQLite).
+- Transfer metadata and resumable transfer state *(planned, Phase 6; new relational state goes in SQLite)*.
+
+Not persisted: login sessions, pairing sessions and the SHA-256 cache. They live in memory, so a restart logs devices out and they sign in again.
 
 Use:
-- Atomic writes.
+- Numbered schema migrations, tracked with `PRAGMA user_version`. Never edit a shipped migration; add a new one.
+- SQLite transactions and WAL mode for safe recovery after unexpected termination.
+- Atomic writes for the settings files.
 - Versioned configuration schemas.
-- Appropriate file permissions.
-- Safe recovery after unexpected termination.
+- Owner-only file permissions on the whole data folder.
 
-Never persist private device keys or plaintext passwords in ordinary configuration files.
+Never persist private device keys or plaintext passwords. The host only stores device *public* keys; private keys stay on each device.
 
 The backend should validate persisted transfer metadata against actual files before resuming operations.
 
@@ -685,6 +811,10 @@ Potential cache targets:
 - Permission lookups.
 
 Directory caches should have short expiration periods or invalidation mechanisms because files can be changed outside the application.
+
+**As built:**
+- In memory: SHA-256 results (invalidated by file version), shares and devices (loaded from SQLite at startup, written through on change), sessions and pairing state.
+- Not built: a directory listing cache.
 
 Resource-management priorities:
 
@@ -719,6 +849,16 @@ Important requirements:
 - Ensure secrets are not included in logs.
 
 A self-hosted application still needs a deliberate certificate-trust model. Self-signed certificates alone do not establish trust unless the client securely verifies the expected host identity.
+
+**As built:**
+- **Trust model:** on first run the host creates a self-signed ECDSA P-256 certificate (names `riftview.local`, `localhost`), stored in `tls/`. The device sees its public key hash (SPKI SHA-256) and binds it into the SPAKE2 pairing proof (§7.1). From then on, the device connects only if the presented key matches that pin. The host user can see the pin with `riftview-api info`.
+- **Rustls** with the `ring` provider.
+- **Listeners:**
+  - The device API binds `0.0.0.0:7878` by default. **This differs from "bind only to interfaces explicitly configured by the user":** it was changed so phones on the LAN or a VPN can connect without editing settings. Set `bind` (or `RIFTVIEW_BIND`) to one address, such as a Tailscale `100.x.y.z`, to restrict it.
+  - The admin API must be loopback; startup fails otherwise.
+- **Unauthenticated routes:** only health, version, pairing and login. The last two are rate-limited per IP.
+- **Limits:** request body 64 KiB; 30-second response-start timeout.
+- **Errors and logs:** errors never contain host paths or raw OS errors. Pairing codes, tokens and keys are never logged.
 
 ---
 
@@ -816,6 +956,18 @@ Measure:
 
 Benchmark different chunk sizes and concurrency limits.
 
+**As built:** 81 tests (`cargo test`).
+- **Unit tests:** path parsing, Range parsing, ETags, hash cache, download limits, stop signal, migrations, crypto, dates.
+- **`tests/api_tests.rs`:** browsing, metadata, downloads, resume, hashing, a file changing mid-download, limits, a 5 GiB sparse file.
+- **`tests/auth_tests.rs`:** pairing and attack cases, login, replay, expiry, revocation, persistence across restart.
+- **`tests/security_tests.rs`:** traversal, symlink escapes, named pipes, forged IDs.
+
+Not yet covered:
+- config loading tests
+- a race test for swapping a folder for a symlink mid-lookup
+- uploads, conflicts
+- performance measurements (§13.4)
+
 ---
 
 # 14. Development Roadmap
@@ -833,6 +985,8 @@ Tasks:
 
 Deliverable: A working Rust HTTP server.
 
+**Status: done.**
+
 ## Phase 2: Filesystem Abstraction
 
 Tasks:
@@ -846,6 +1000,8 @@ Tasks:
 
 Deliverable: A secure filesystem module independent of HTTP.
 
+**Status: done.** Remaining: a race test for path lookups.
+
 ## Phase 3: REST API
 
 Tasks:
@@ -857,6 +1013,8 @@ Tasks:
 - Add API integration tests.
 
 Deliverable: A functional filesystem REST API.
+
+**Status: done**, including abandoned-listing cancellation. Remaining: `ETag` on `GET /api/files/{id}`, config loading tests.
 
 ## Phase 4: Authentication and Authorization
 
@@ -871,6 +1029,8 @@ Tasks:
 
 Deliverable: A device-authenticated API with authorization enforcement.
 
+**Status: done.** Devices are persisted in SQLite. Share and device management are host-only (admin API + CLI).
+
 ## Phase 5: Download Engine
 
 Tasks:
@@ -882,6 +1042,8 @@ Tasks:
 - Test large files.
 
 Deliverable: Reliable large-file downloads.
+
+**Status: done.** Streaming, bounded buffering, Range, `ETag`/`If-Range`, stop on disconnect, SHA-256 hash endpoint, concurrent download limits, 5 GiB test. Remaining: real-world memory and throughput measurements (Phase 9).
 
 ## Phase 6: Upload Engine
 
@@ -896,6 +1058,8 @@ Tasks:
 
 Deliverable: Reliable resumable uploads.
 
+**Status: not started.** Transfer state will go in SQLite.
+
 ## Phase 7: Filesystem Management
 
 Tasks:
@@ -907,6 +1071,8 @@ Tasks:
 - Handle conflicts and partial failures.
 
 Deliverable: Complete authorized filesystem management.
+
+**Status: not started.** The permissions and the per-share `writable` flag already exist and are checked.
 
 ## Phase 8: Cross-Platform Integration
 
@@ -922,6 +1088,8 @@ Tasks:
 
 Deliverable: Cross-platform native host service.
 
+**Status: not started.** Built and tested on macOS only. Per-OS data-folder code exists.
+
 ## Phase 9: Optimization and Release
 
 Tasks:
@@ -936,6 +1104,8 @@ Tasks:
 - Publish source code and release builds.
 
 Deliverable: Stable open-source Rust backend.
+
+**Status: not started.**
 
 ---
 
@@ -979,15 +1149,18 @@ Defer:
 | Async runtime | Tokio |
 | JSON | Serde |
 | HTTP middleware | Tower |
-| TLS | Rustls |
+| TLS | Rustls (ring), self-signed ECDSA P-256 certificate, pinned by clients |
+| Pairing | SPAKE2 (six-digit code) + host approval |
+| Device identity | Ed25519 |
 | Logging | Tracing |
 | Identifiers | UUID |
 | Integrity | SHA-256 |
-| Filesystem | std::fs / tokio::fs |
-| Persistence | Local files |
+| Filesystem | cap-std (confined), std::fs / tokio::fs |
+| Persistence | Embedded SQLite (`riftview.db`) + small settings files |
 | Cache | In-process, if needed |
-| Database | None |
-| Deployment | Native background process |
+| Database | SQLite via rusqlite (embedded, no server) |
+| Host management | Loopback admin API + `riftview-api` CLI |
+| Deployment | Native background process (planned; terminal today) |
 
 ## Engineering Priorities
 

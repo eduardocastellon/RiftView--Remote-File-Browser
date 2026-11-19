@@ -54,6 +54,15 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Routes that may take a long time before their response starts, so the
+/// server leaves them out of the request timeout. Hashing a 50 GB file
+/// reads all of it before there's anything to send.
+pub fn slow_router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/files/{id}/hash", get(files::hash))
+        .with_state(state)
+}
+
 async fn limit_requests_per_ip(
     State(state): State<AppState>,
     ConnectInfo(client): ConnectInfo<SocketAddr>,

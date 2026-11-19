@@ -30,15 +30,17 @@ pub fn app(state: AppState) -> Router {
     let config = state.config().clone();
     let request_timeout = Duration::from_secs(config.request_timeout_secs);
 
-    api::router(state)
-        // Reject oversized request bodies.
-        .layer(DefaultBodyLimit::max(config.max_request_body_bytes))
+    api::router(state.clone())
         // Give up if a response hasn't *started* in time. Once a download
         // is streaming, this no longer applies.
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             request_timeout,
         ))
+        // Routes that are allowed to take longer (e.g. hashing big files).
+        .merge(api::slow_router(state))
+        // Reject oversized request bodies.
+        .layer(DefaultBodyLimit::max(config.max_request_body_bytes))
         // Log every request.
         .layer(TraceLayer::new_for_http())
 }

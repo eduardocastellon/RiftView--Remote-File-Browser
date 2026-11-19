@@ -28,6 +28,11 @@ enum Command {
     Info,
     /// List paired devices.
     Devices,
+    /// Give a device your own name for it (omit the name to remove it).
+    Rename {
+        device_id: String,
+        alias: Option<String>,
+    },
     /// Revoke a device so it can never connect again.
     Revoke { device_id: String },
     /// Manage shared folders.
@@ -61,6 +66,7 @@ fn main() -> ExitCode {
         Command::Pair => cli::pair(),
         Command::Info => cli::info(),
         Command::Devices => cli::list_devices(),
+        Command::Rename { device_id, alias } => cli::rename_device(&device_id, alias.as_deref()),
         Command::Revoke { device_id } => cli::revoke_device(&device_id),
         Command::Share(ShareCommand::List) => cli::list_shares(),
         Command::Share(ShareCommand::Add {

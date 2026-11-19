@@ -56,6 +56,8 @@ pub struct IssuedChallenge {
 }
 
 pub struct IssuedSession {
+    /// The device that logged in.
+    pub device_id: String,
     pub token: String,
     pub expires_in: Duration,
 }
@@ -148,6 +150,7 @@ impl SessionManager {
         );
 
         Ok(IssuedSession {
+            device_id: device.id.clone(),
             token,
             expires_in: self.session_lifetime,
         })

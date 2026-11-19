@@ -11,7 +11,6 @@ use crate::auth::Permission;
 use crate::auth::devices::Device;
 use crate::auth::pairing::HostView;
 use crate::error::AppError;
-use crate::filesystem::roots::now_ms;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -65,14 +64,7 @@ pub async fn approve(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let pending = state.pairing().approve(&request.pairing_id)?;
 
-    let device = Device {
-        id: pending.device_id,
-        name: pending.name,
-        public_key: crate::auth::crypto::encode_base64(&pending.public_key),
-        permissions: request.permissions,
-        paired_at_ms: now_ms(),
-        revoked_at_ms: None,
-    };
+    let device = Device::new_paired(pending.device_id, pending.description, request.permissions);
     let device = state.devices().write().await.add(device)?;
     tracing::info!(device_id = %device.id, "device paired");
 

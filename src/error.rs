@@ -107,6 +107,9 @@ impl From<FsError> for AppError {
                 tracing::error!(error = %io_error, "filesystem I/O error");
                 AppError::Internal
             }
+            // Only happens when nobody is waiting for the response, so the
+            // client never actually sees this.
+            FsError::Abandoned => AppError::Unavailable("request was abandoned".into()),
         }
     }
 }
@@ -117,8 +120,8 @@ impl From<ShareError> for AppError {
             ShareError::NotFound => AppError::NotFound,
             ShareError::Invalid(reason) => AppError::BadRequest(reason.into()),
             ShareError::Overlap => AppError::Conflict(error.to_string()),
-            ShareError::UnsupportedVersion(_) | ShareError::Io(_) => {
-                tracing::error!(%error, "share store error");
+            ShareError::Database(database_error) => {
+                tracing::error!(error = %database_error, "share store error");
                 AppError::Internal
             }
         }
@@ -151,8 +154,9 @@ impl From<DeviceError> for AppError {
     fn from(error: DeviceError) -> Self {
         match error {
             DeviceError::NotFound => AppError::NotFound,
-            DeviceError::UnsupportedVersion(_) | DeviceError::Io(_) => {
-                tracing::error!(%error, "device store error");
+            DeviceError::Invalid(reason) => AppError::BadRequest(reason.into()),
+            DeviceError::Database(database_error) => {
+                tracing::error!(error = %database_error, "device store error");
                 AppError::Internal
             }
         }

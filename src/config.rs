@@ -50,6 +50,13 @@ pub struct Config {
 
     /// Largest allowed request body for ordinary (non-upload) requests.
     pub max_request_body_bytes: usize,
+
+    /// Downloads (and SHA-256 hash requests) that may run at once across
+    /// all devices. Extra requests get `429 too_many_requests`.
+    pub max_concurrent_downloads: usize,
+
+    /// Downloads (and SHA-256 hash requests) one device may run at once.
+    pub max_downloads_per_device: usize,
 }
 
 impl Default for Config {
@@ -65,6 +72,8 @@ impl Default for Config {
             max_dir_entries: 100_000,
             request_timeout_secs: 30,
             max_request_body_bytes: 64 * 1024,
+            max_concurrent_downloads: 16,
+            max_downloads_per_device: 4,
         }
     }
 }

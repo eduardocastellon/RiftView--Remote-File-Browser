@@ -1,24 +1,20 @@
-//! Shares (the folders the host user chose to expose) and the list of
-//! them saved on disk.
+//! Shares (the folders the host user chose to expose), saved in the
+//! `shares` table of the database.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
-use serde::{Deserialize, Serialize};
+use rusqlite::{Row, params};
 
 use super::{FsError, RelPath};
-use crate::storage;
+use crate::database::{Database, DatabaseError};
 
-/// Bump this when the layout of `shared_directories.json` changes.
-pub const SHARES_SCHEMA_VERSION: u32 = 1;
-
-const SHARES_FILE_NAME: &str = "shared_directories.json";
 const MAX_SHARE_NAME_LEN: usize = 128;
 
 /// A folder the host user has explicitly chosen to expose.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Share {
     /// Opaque ID such as `shr_3f2a…`.
     pub id: String,
@@ -55,13 +51,17 @@ impl Share {
         }
         Ok(root.open_dir(path.to_cap_path())?)
     }
-}
 
-/// What `shared_directories.json` looks like on disk.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct SharesFile {
-    schema_version: u32,
-    shares: Vec<Share>,
+    /// Build a share from a row of `SELECT id, name, path, writable, created_at_ms`.
+    fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            name: row.get("name")?,
+            path: PathBuf::from(row.get::<_, String>("path")?),
+            writable: row.get("writable")?,
+            created_at_ms: row.get("created_at_ms")?,
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,11 +75,14 @@ pub enum ShareError {
     #[error("this directory (or one containing/inside it) is already shared")]
     Overlap,
 
-    #[error("unsupported {SHARES_FILE_NAME} schema_version {0}")]
-    UnsupportedVersion(u32),
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+}
 
-    #[error("share storage I/O: {0}")]
-    Io(#[from] std::io::Error),
+impl From<rusqlite::Error> for ShareError {
+    fn from(error: rusqlite::Error) -> Self {
+        ShareError::Database(error.into())
+    }
 }
 
 /// Details for registering a new share.
@@ -96,29 +99,32 @@ pub struct SharePatch {
     pub writable: Option<bool>,
 }
 
-/// All registered shares, kept in memory and saved to disk after every
-/// change.
-#[derive(Debug)]
+/// All registered shares.
+///
+/// The database is the record; `shares` is an in-memory copy so every
+/// request can look shares up without touching the disk. Each change is
+/// written to the database first and only applied to memory once that
+/// succeeded, so the two never disagree.
 pub struct ShareStore {
-    shares_file: PathBuf,
+    database: Database,
 
     /// RiftView's own data folder. It must never be shared, because it
-    /// will hold device keys.
+    /// holds the database, device keys and certificate.
     data_dir: PathBuf,
 
     shares: Vec<Share>,
 }
 
 impl ShareStore {
-    pub fn load(data_dir: &Path) -> Result<Self, ShareError> {
-        let shares_file = data_dir.join(SHARES_FILE_NAME);
-
-        let shares = match storage::read_json::<SharesFile>(&shares_file)? {
-            None => Vec::new(),
-            Some(saved) if saved.schema_version != SHARES_SCHEMA_VERSION => {
-                return Err(ShareError::UnsupportedVersion(saved.schema_version));
-            }
-            Some(saved) => saved.shares,
+    pub fn load(database: Database, data_dir: &Path) -> Result<Self, DatabaseError> {
+        let shares = {
+            let connection = database.connection();
+            let mut query = connection.prepare(
+                "SELECT id, name, path, writable, created_at_ms FROM shares ORDER BY created_at_ms",
+            )?;
+            query
+                .query_map([], Share::from_row)?
+                .collect::<Result<Vec<_>, _>>()?
         };
 
         let data_dir = data_dir
@@ -126,7 +132,7 @@ impl ShareStore {
             .unwrap_or_else(|_| data_dir.to_path_buf());
 
         Ok(Self {
-            shares_file,
+            database,
             data_dir,
             shares,
         })
@@ -143,51 +149,62 @@ impl ShareStore {
     pub fn add(&mut self, new_share: NewShare) -> Result<Share, ShareError> {
         let name = validate_name(&new_share.name)?;
         let path = self.validate_new_share_path(&new_share.path)?;
+        let path_text = path
+            .to_str()
+            .ok_or(ShareError::Invalid("path must be valid Unicode"))?;
 
         let share = Share {
             id: format!("shr_{}", uuid::Uuid::new_v4().simple()),
             name,
-            path,
+            path: path.clone(),
             writable: new_share.writable,
             created_at_ms: now_ms(),
         };
 
-        self.shares.push(share.clone());
+        self.database.connection().execute(
+            "INSERT INTO shares (id, name, path, writable, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                share.id,
+                share.name,
+                path_text,
+                share.writable,
+                share.created_at_ms
+            ],
+        )?;
 
-        // If saving fails, undo the in-memory change so memory and disk agree.
-        if let Err(error) = self.save() {
-            self.shares.pop();
-            return Err(error);
-        }
+        self.shares.push(share.clone());
         Ok(share)
     }
 
     pub fn update(&mut self, id: &str, patch: SharePatch) -> Result<Share, ShareError> {
         let index = self.index_of(id)?;
-        let original = self.shares[index].clone();
 
+        let mut updated = self.shares[index].clone();
         if let Some(name) = patch.name {
-            self.shares[index].name = validate_name(&name)?;
+            updated.name = validate_name(&name)?;
         }
         if let Some(writable) = patch.writable {
-            self.shares[index].writable = writable;
+            updated.writable = writable;
         }
 
-        if let Err(error) = self.save() {
-            self.shares[index] = original;
-            return Err(error);
-        }
-        Ok(self.shares[index].clone())
+        self.database.connection().execute(
+            "UPDATE shares SET name = ?1, writable = ?2 WHERE id = ?3",
+            params![updated.name, updated.writable, id],
+        )?;
+
+        self.shares[index] = updated.clone();
+        Ok(updated)
     }
 
     pub fn remove(&mut self, id: &str) -> Result<(), ShareError> {
         let index = self.index_of(id)?;
-        let removed = self.shares.remove(index);
 
-        if let Err(error) = self.save() {
-            self.shares.insert(index, removed);
-            return Err(error);
-        }
+        self.database
+            .connection()
+            .execute("DELETE FROM shares WHERE id = ?1", params![id])?;
+
+        self.shares.remove(index);
         Ok(())
     }
 
@@ -230,15 +247,6 @@ impl ShareStore {
             .position(|share| share.id == id)
             .ok_or(ShareError::NotFound)
     }
-
-    fn save(&self) -> Result<(), ShareError> {
-        let file_contents = SharesFile {
-            schema_version: SHARES_SCHEMA_VERSION,
-            shares: self.shares.clone(),
-        };
-        storage::write_json_atomic(&self.shares_file, &file_contents)?;
-        Ok(())
-    }
 }
 
 fn validate_name(name: &str) -> Result<String, ShareError> {
@@ -278,18 +286,25 @@ mod tests {
     struct Fixture {
         data_dir: tempfile::TempDir,
         files_dir: tempfile::TempDir,
+        database: Database,
         store: ShareStore,
     }
 
     fn fixture() -> Fixture {
         let data_dir = tempfile::tempdir().unwrap();
         let files_dir = tempfile::tempdir().unwrap();
-        let store = ShareStore::load(data_dir.path()).unwrap();
+        let database = Database::open(data_dir.path()).unwrap();
+        let store = ShareStore::load(database.clone(), data_dir.path()).unwrap();
         Fixture {
             data_dir,
             files_dir,
+            database,
             store,
         }
+    }
+
+    fn reload(fx: &Fixture) -> ShareStore {
+        ShareStore::load(fx.database.clone(), fx.data_dir.path()).unwrap()
     }
 
     fn new_share(name: &str, path: &Path) -> NewShare {
@@ -301,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn add_save_reload_remove() {
+    fn add_update_reload_remove() {
         let mut fx = fixture();
         let share = fx
             .store
@@ -309,12 +324,23 @@ mod tests {
             .unwrap();
         assert!(share.id.starts_with("shr_"));
 
-        let reloaded = ShareStore::load(fx.data_dir.path()).unwrap();
+        let reloaded = reload(&fx);
         assert_eq!(reloaded.list().len(), 1);
         assert_eq!(reloaded.get(&share.id).unwrap().name, "Docs");
+        assert_eq!(reloaded.get(&share.id).unwrap().path, share.path);
+
+        let patch = SharePatch {
+            name: Some("Documents".into()),
+            writable: Some(true),
+        };
+        fx.store.update(&share.id, patch).unwrap();
+        let reloaded = reload(&fx);
+        let saved = reloaded.get(&share.id).unwrap();
+        assert_eq!(saved.name, "Documents");
+        assert!(saved.writable);
 
         fx.store.remove(&share.id).unwrap();
-        let reloaded = ShareStore::load(fx.data_dir.path()).unwrap();
+        let reloaded = reload(&fx);
         assert!(reloaded.list().is_empty());
     }
 
