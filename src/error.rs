@@ -131,6 +131,13 @@ impl From<FsError> for AppError {
             // client never actually sees this.
             FsError::Abandoned => AppError::Unavailable("request was abandoned".into()),
             FsError::NoFreeName => AppError::Conflict("no free file name".into()),
+            FsError::AlreadyExists => {
+                AppError::Conflict("an item with that name already exists".into())
+            }
+            FsError::Unsupported(reason) => AppError::Conflict(reason.into()),
+            FsError::TrashFailed => {
+                AppError::Conflict("couldn't move it to the Trash; nothing was deleted".into())
+            }
         }
     }
 }

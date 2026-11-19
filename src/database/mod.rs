@@ -23,6 +23,7 @@ pub const DATABASE_FILE_NAME: &str = "riftview.db";
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_devices_and_shares.sql"),
     include_str!("migrations/002_uploads.sql"),
+    include_str!("migrations/003_move_jobs.sql"),
 ];
 
 #[derive(Debug, thiserror::Error)]

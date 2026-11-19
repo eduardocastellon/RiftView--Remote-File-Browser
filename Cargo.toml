@@ -37,3 +37,12 @@ tower = { version = "0.5.3", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Moving deleted items to the Trash. On macOS we call NSFileManager directly
+# (to tell "this disk has no Trash" apart from other failures); elsewhere the
+# `trash` crate does it.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL", "FoundationErrors"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+trash = "5.4.0"

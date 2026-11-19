@@ -115,6 +115,12 @@ pub async fn remove(
 ) -> Result<StatusCode, AppError> {
     state.share(&id).await?; // 404 before touching anything.
 
+    if state.jobs().is_share_busy(&id)? {
+        return Err(AppError::Conflict(
+            "a move into or out of this share is in progress; try again when it's done".into(),
+        ));
+    }
+
     // Delete unfinished uploads' partial files while we still manage the
     // folder; otherwise they'd be left behind.
     cleanup::discard_uploads_in_share(&state, &id).await?;

@@ -8,6 +8,7 @@
 mod auth;
 mod files;
 mod health;
+mod manage;
 mod pairing;
 mod shares;
 mod transfers;
@@ -50,8 +51,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/shares", get(shares::list))
         .route("/api/shares/{id}", get(shares::get_one))
         .route("/api/shares/{id}/files", get(files::browse))
-        .route("/api/files/{id}", get(files::metadata))
+        .route("/api/shares/{id}/directories", post(manage::create_folder))
+        .route(
+            "/api/files/{id}",
+            get(files::metadata).delete(manage::delete),
+        )
         .route("/api/files/{id}/download", get(files::download))
+        .route("/api/files/{id}/rename", post(manage::rename))
+        .route("/api/files/{id}/move", post(manage::move_item))
+        .route(
+            "/api/jobs/{id}",
+            get(manage::job_status).delete(manage::cancel_job),
+        )
         .route(
             "/api/transfers",
             get(transfers::list).post(transfers::start),

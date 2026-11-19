@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::metadata::{Entry, EntryKind};
 use super::roots::Share;
-use super::writing::is_upload_file_name;
-use super::{FsError, RelPath, StopSignal, run_blocking_stoppable};
+use super::{FsError, RelPath, StopSignal, is_internal_name, run_blocking_stoppable};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -99,8 +98,8 @@ fn list_dir_blocking(
         let Ok(name) = dir_entry.file_name().into_string() else {
             continue;
         };
-        // Partial uploads aren't files yet.
-        if is_upload_file_name(&name) {
+        // RiftView's own temporary files (partial uploads and copies).
+        if is_internal_name(&name) {
             continue;
         }
         let Ok(child_path) = path.join_name(&name) else {

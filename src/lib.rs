@@ -9,6 +9,7 @@
 //!   and download limits.
 //! - [`api`] turns HTTP requests into calls to [`filesystem`] and
 //!   [`transfers`].
+//! - [`jobs`] runs slow background work (moves between disks).
 //! - [`database`] is the SQLite database holding shares and devices.
 //! - [`storage`] saves small settings files (config, admin token,
 //!   certificate) safely.
@@ -22,6 +23,7 @@ pub mod config;
 pub mod database;
 pub mod error;
 pub mod filesystem;
+pub mod jobs;
 pub mod platform;
 pub mod server;
 pub mod state;

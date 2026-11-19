@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::filesystem::trash::TrashBin;
 use crate::storage;
 
 /// Bump this when the layout of `config.json` changes.
@@ -78,6 +79,12 @@ pub struct Config {
     /// body. Longer than `request_timeout_secs` because a 4 MiB chunk over
     /// a slow mobile connection can take a while.
     pub chunk_upload_timeout_secs: u64,
+
+    /// **Tests only:** where deleted items go instead of the system Trash.
+    /// Not read from or written to `config.json`: on a real host, deletes
+    /// always go to the disk's Trash.
+    #[serde(skip)]
+    pub trash_for_tests: Option<TrashBin>,
 }
 
 impl Default for Config {
@@ -100,6 +107,7 @@ impl Default for Config {
             max_uploads_total: 32,
             upload_expiry_secs: 24 * 60 * 60,
             chunk_upload_timeout_secs: 5 * 60,
+            trash_for_tests: None,
         }
     }
 }

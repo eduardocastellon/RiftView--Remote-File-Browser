@@ -2,7 +2,7 @@
 
 A self-hosted Rust service that lets your paired devices browse and download folders you choose to share. It runs on your computer and is reached over your LAN or any VPN you like (Tailscale, Radmin, Hamachi…). No cloud service involved. See [planning.md](planning.md) for the full specification.
 
-> **Status:** phases 1–6 are done: secure filesystem layer, read API, HTTPS, device pairing, login and permissions, the download engine (streaming, resume with `ETag`/`If-Range`, SHA-256 verification, transfer limits) and resumable chunked uploads. File management (rename, move, delete, new folder; phase 7) is next.
+> **Status:** phases 1–6 are done: secure filesystem layer, read API, HTTPS, device pairing, login and permissions, the download engine (streaming, resume with `ETag`/`If-Range`, SHA-256 verification, transfer limits), resumable chunked uploads, and file management (rename, move, new folder, delete to the Trash). Cross-platform packaging (phase 8) is next.
 
 ## Quick start
 
@@ -35,6 +35,7 @@ cargo run -- info                             # addresses and certificate pin
 - **Login:** every connection, the device signs a single-use challenge with its Ed25519 key and gets a session token (1 hour).
 - **Admin API:** loopback only, and it also needs the token in `<data dir>/admin_token`, which only your OS user can read.
 - **Storage:** shares, devices, device permissions and unfinished uploads live in a SQLite database, `riftview.db`, in the data folder. Settings and secrets stay as files.
+- **Deletes** always go to the Trash of the disk the item is on, so the host user can put things back. Only a disk with no Trash at all gets a permanent delete; any other Trash problem deletes nothing. **Moves between disks** run as background jobs: copy under a hidden name, then delete the original only once the copy is complete.
 - **Uploads:** partial data is written to a hidden `.riftview-upload-<id>.part` file in the target folder, so finishing is an instant rename on the same disk. Devices never see these files.
 
 Client developers: the exact protocol is in [docs/auth-protocol.md](docs/auth-protocol.md).
@@ -63,7 +64,7 @@ Data folder (owner-only permissions):
 
 | File | Holds |
 |---|---|
-| `riftview.db` (+ `-wal`, `-shm`) | Shares, devices, device permissions, unfinished uploads (SQLite) |
+| `riftview.db` (+ `-wal`, `-shm`) | Shares, devices, device permissions, unfinished uploads, move jobs (SQLite) |
 | `config.json` | Settings above |
 | `admin_token` | Secret for the admin API |
 | `tls/` | Self-signed certificate and its private key |
@@ -95,6 +96,11 @@ Data folder (owner-only permissions):
 | PUT | `/api/transfers/{id}/chunks/{index}` (4 MiB chunk, `X-Chunk-SHA256`) | `upload` + writable share |
 | POST | `/api/transfers/{id}/complete` (whole-file SHA-256 check, save; renames on a clash) | `upload` + writable share |
 | DELETE | `/api/transfers/{id}` (cancel) | `upload` |
+| POST | `/api/files/{id}/rename` `{name}` (`409` if taken) | `rename` + writable share |
+| POST | `/api/files/{id}/move` `{share_id?, path}`: `200` item, or `202` job when moving to another disk | `move` + both shares writable |
+| POST | `/api/shares/{id}/directories` `{path, name}` (new folder) | `upload` + writable share |
+| DELETE | `/api/files/{id}` (file or whole folder) → `{deleted: "trash"\|"permanent"}` | `delete` + writable share |
+| GET, DELETE | `/api/jobs/{id}` (move job progress / cancel) | `move` |
 
 Errors are JSON: `{"error":{"code":"not_found","message":"not found"}}`. They never contain host paths.
 
@@ -112,7 +118,8 @@ src/
   api/         device API handlers (thin)
   admin/       host-only admin API + admin token
   auth/        pairing (SPAKE2), login sessions, devices & permissions, rate limit
-  filesystem/  resolver, shares, browsing, metadata, file opening — no HTTP
+  filesystem/  resolver, shares, browsing, metadata, uploads, rename/move/delete, copying — no HTTP
+  jobs/        background moves between disks
   transfers/   download streaming, ETags, SHA-256 hashing, transfer limits, uploads + cleanup
   database/    SQLite connection and numbered schema migrations (migrations/*.sql)
   storage/     atomic writes for config, admin token, certificate

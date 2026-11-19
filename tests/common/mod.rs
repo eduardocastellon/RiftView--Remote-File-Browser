@@ -4,6 +4,7 @@
 
 #![allow(dead_code)] // Not every test file uses every helper.
 
+use riftview_api::filesystem::trash::TrashBin;
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -71,10 +72,18 @@ impl TestHost {
         .await
     }
 
-    pub async fn with_config(config: Config) -> Self {
+    pub async fn with_config(mut config: Config) -> Self {
         let data_dir = tempfile::tempdir().unwrap();
         let shared_dir = tempfile::tempdir().unwrap();
         let outside_dir = tempfile::tempdir().unwrap();
+
+        // Never fill the real Trash with test files: deletes go to a folder
+        // standing in for it (unless the test chose something else).
+        if config.trash_for_tests.is_none() {
+            let trash = data_dir.path().join("test-trash");
+            std::fs::create_dir(&trash).unwrap();
+            config.trash_for_tests = Some(TrashBin::Folder(trash));
+        }
 
         create_sample_files(shared_dir.path());
         std::fs::write(outside_dir.path().join("secret.txt"), b"TOP SECRET").unwrap();
@@ -109,6 +118,40 @@ impl TestHost {
         host.device = host.pair_device("Test Phone", FULL_ACCESS).await;
         host.token = host.log_in(&host.device).await.expect("login failed");
         host
+    }
+
+    /// Let devices change files in the test share (shares are read-only by
+    /// default).
+    pub async fn make_share_writable(&self) {
+        let uri = format!("/admin/shares/{}", self.share_id);
+        let (status, body) = self
+            .admin_json("PATCH", &uri, Some(json!({ "writable": true })))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// Share another folder (writable) and return its ID and the folder.
+    pub async fn add_second_share(&self) -> (String, tempfile::TempDir) {
+        let folder = tempfile::tempdir().unwrap();
+        let request = json!({ "name": "Second", "path": folder.path(), "writable": true });
+        let (status, body) = self
+            .admin_json("POST", "/admin/shares", Some(request))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        (body["id"].as_str().unwrap().to_owned(), folder)
+    }
+
+    /// Names of the items in the stand-in Trash folder (each prefixed with
+    /// a unique ID, as the real Trash renames duplicates).
+    pub fn trashed_names(&self) -> Vec<String> {
+        let trash = self.data_dir.path().join("test-trash");
+        std::fs::read_dir(trash)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Simulate a host restart: load everything again from the data folder.

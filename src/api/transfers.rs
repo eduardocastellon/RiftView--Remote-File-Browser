@@ -22,7 +22,7 @@ use crate::auth::{AuthenticatedDevice, Permission};
 use crate::error::AppError;
 use crate::filesystem::metadata::Entry;
 use crate::filesystem::roots::Share;
-use crate::filesystem::{FsError, RelPath, writing};
+use crate::filesystem::{FREE_SPACE_MARGIN_BYTES, FsError, RelPath, writing};
 use crate::state::AppState;
 use crate::transfers::cleanup;
 use crate::transfers::hashing;
@@ -31,9 +31,6 @@ use crate::transfers::uploads::{NewUpload, Upload, UploadLimits};
 
 /// Header carrying a chunk's SHA-256 (lowercase hex).
 const CHUNK_HASH_HEADER: &str = "x-chunk-sha256";
-
-/// Room left on the disk after an upload, so it never fills up completely.
-const FREE_SPACE_MARGIN_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
 // ---------------------------------------------------------------------------
 // Responses
@@ -387,7 +384,7 @@ fn own_upload(
 }
 
 /// The share, if it exists and the host allows changes in it.
-async fn writable_share(state: &AppState, share_id: &str) -> Result<Share, AppError> {
+pub(super) async fn writable_share(state: &AppState, share_id: &str) -> Result<Share, AppError> {
     let share = state.share(share_id).await?;
     if !share.writable {
         return Err(AppError::Forbidden);
@@ -395,7 +392,10 @@ async fn writable_share(state: &AppState, share_id: &str) -> Result<Share, AppEr
     Ok(share)
 }
 
-fn transfer_slot(state: &AppState, device: &AuthenticatedDevice) -> Result<TransferSlot, AppError> {
+pub(super) fn transfer_slot(
+    state: &AppState,
+    device: &AuthenticatedDevice,
+) -> Result<TransferSlot, AppError> {
     state
         .transfer_limiter()
         .try_start(&device.id)

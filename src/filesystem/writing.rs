@@ -15,8 +15,9 @@ use axum::body::Bytes;
 use cap_std::fs::{Dir, OpenOptions};
 
 use super::metadata::Entry;
+use super::os::available_bytes;
 use super::roots::Share;
-use super::{FsError, RelPath, run_blocking};
+use super::{FsError, RelPath, run_blocking, validate_new_name};
 
 const UPLOAD_FILE_PREFIX: &str = ".riftview-upload-";
 const UPLOAD_FILE_SUFFIX: &str = ".part";
@@ -29,19 +30,9 @@ pub fn upload_file_name(upload_id: &str) -> String {
     format!("{UPLOAD_FILE_PREFIX}{upload_id}{UPLOAD_FILE_SUFFIX}")
 }
 
-/// Is this the name of a partial upload file? Such files are hidden from
-/// listings and can't be downloaded, uploaded over or named by devices.
-pub fn is_upload_file_name(name: &str) -> bool {
-    name.starts_with(UPLOAD_FILE_PREFIX) && name.ends_with(UPLOAD_FILE_SUFFIX)
-}
-
 /// Check a file name a device wants to upload as.
 pub fn validate_upload_name(name: &str) -> Result<(), FsError> {
-    RelPath::root().join_name(name)?;
-    if is_upload_file_name(name) {
-        return Err(FsError::InvalidPath("that file name is reserved"));
-    }
-    Ok(())
+    validate_new_name(name)
 }
 
 /// Bytes free for us on the disk holding `folder`, or `None` if the OS
@@ -54,31 +45,6 @@ pub async fn free_space(share: Share, folder: RelPath) -> Result<Option<u64>, Fs
         Ok(available_bytes(&dir).ok())
     })
     .await
-}
-
-#[cfg(unix)]
-fn available_bytes(dir: &Dir) -> std::io::Result<u64> {
-    use std::os::fd::AsRawFd;
-
-    // SAFETY: `statvfs` is plain data, so all-zeroes is a valid value, and
-    // `fstatvfs` only writes into it. The descriptor stays open for the
-    // whole call because `dir` is borrowed.
-    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-    let result = unsafe { libc::fstatvfs(dir.as_raw_fd(), &mut stats) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    // `f_bavail` counts blocks available to unprivileged users, which is
-    // what we are.
-    Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
-}
-
-#[cfg(not(unix))]
-fn available_bytes(_dir: &Dir) -> std::io::Result<u64> {
-    Err(std::io::Error::other(
-        "free space check not implemented on this OS",
-    ))
 }
 
 /// Create the empty partial file for a new upload.
@@ -245,7 +211,7 @@ mod tests {
     fn upload_file_names_are_reserved() {
         let name = upload_file_name("upl_123");
         assert_eq!(name, ".riftview-upload-upl_123.part");
-        assert!(is_upload_file_name(&name));
+        assert!(super::super::is_internal_name(&name));
         assert!(validate_upload_name(&name).is_err());
 
         assert!(validate_upload_name("photo.jpg").is_ok());

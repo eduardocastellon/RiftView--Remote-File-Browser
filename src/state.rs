@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::database::{Database, DatabaseError};
 use crate::error::AppError;
 use crate::filesystem::roots::{Share, ShareStore};
+use crate::jobs::JobStore;
 use crate::tls::{HostIdentity, TlsError};
 use crate::transfers::hashing::HashCache;
 use crate::transfers::limits::TransferLimiter;
@@ -38,6 +39,7 @@ struct Inner {
     transfer_limiter: TransferLimiter,
     hash_cache: HashCache,
     uploads: UploadStore,
+    jobs: JobStore,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,7 +58,8 @@ impl AppState {
         let database = Database::open(&data_dir)?;
         let shares = ShareStore::load(database.clone(), &data_dir)?;
         let devices = DeviceStore::load(database.clone())?;
-        let uploads = UploadStore::new(database);
+        let uploads = UploadStore::new(database.clone());
+        let jobs = JobStore::new(database);
         let identity = HostIdentity::load_or_create(&data_dir)?;
         let admin_token = AdminToken::load_or_create(&data_dir)?;
         let sessions = SessionManager::new(Duration::from_secs(config.session_lifetime_secs));
@@ -79,6 +82,7 @@ impl AppState {
             transfer_limiter,
             hash_cache: HashCache::default(),
             uploads,
+            jobs,
         })))
     }
 
@@ -128,6 +132,10 @@ impl AppState {
 
     pub fn uploads(&self) -> &UploadStore {
         &self.0.uploads
+    }
+
+    pub fn jobs(&self) -> &JobStore {
+        &self.0.jobs
     }
 
     /// A copy of one share's details, or a 404 error if it doesn't exist.

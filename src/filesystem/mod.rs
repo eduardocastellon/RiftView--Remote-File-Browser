@@ -1,7 +1,9 @@
 //! Reading files and folders inside shares, without ever escaping them.
 //!
 //! This module knows nothing about HTTP. Reading lives in [`browser`] and
-//! [`operations`]; writing uploads lives in [`writing`].
+//! [`operations`]; writing uploads lives in [`writing`]; rename, move,
+//! new folder and delete live in [`managing`] (and [`copying`] for moves
+//! between disks).
 //!
 //! ## How we stay inside a share
 //!
@@ -17,11 +19,15 @@
 //! starts with the share's path, which can be tricked or raced.
 
 pub mod browser;
+pub mod copying;
 pub mod ids;
+pub mod managing;
 pub mod metadata;
 pub mod operations;
+pub mod os;
 pub mod resolver;
 pub mod roots;
+pub mod trash;
 pub mod writing;
 
 pub use ids::FileId;
@@ -67,6 +73,20 @@ pub enum FsError {
     /// Every name from `name.ext` to `name (999).ext` is taken.
     #[error("no free file name")]
     NoFreeName,
+
+    /// The new name for a rename, move or new folder is already taken.
+    #[error("an item with that name already exists")]
+    AlreadyExists,
+
+    /// Moving an item to the Trash failed for a reason other than "this
+    /// disk has no Trash". Nothing was deleted.
+    #[error("couldn't move it to the Trash; nothing was deleted")]
+    TrashFailed,
+
+    /// Something we deliberately don't handle, e.g. copying symlinks
+    /// between disks.
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 impl From<std::io::Error> for FsError {
@@ -81,9 +101,35 @@ impl From<std::io::Error> for FsError {
     }
 }
 
+/// Room to leave free on a disk after an upload or a copy, so it never
+/// fills up completely.
+pub const FREE_SPACE_MARGIN_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Prefix of every file or folder RiftView creates for its own use inside
+/// a share: partial uploads and partial copies made by moves.
+const INTERNAL_NAME_PREFIX: &str = ".riftview-";
+const INTERNAL_NAME_SUFFIX: &str = ".part";
+
+/// Is this one of RiftView's own temporary files? They are hidden from
+/// listings, can't be opened through the API, and devices can't create
+/// files with such names.
+pub fn is_internal_name(name: &str) -> bool {
+    name.starts_with(INTERNAL_NAME_PREFIX) && name.ends_with(INTERNAL_NAME_SUFFIX)
+}
+
+/// Check a new file or folder name chosen by a device: a single valid
+/// name that isn't reserved for RiftView's temporary files.
+pub fn validate_new_name(name: &str) -> Result<(), FsError> {
+    RelPath::root().join_name(name)?;
+    if is_internal_name(name) {
+        return Err(FsError::InvalidPath("that name is reserved"));
+    }
+    Ok(())
+}
+
 /// Run slow, blocking filesystem work on a background thread so it doesn't
 /// stall the async server.
-pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, FsError>
+pub async fn run_blocking<T, F>(work: F) -> Result<T, FsError>
 where
     F: FnOnce() -> Result<T, FsError> + Send + 'static,
     T: Send + 'static,
@@ -115,14 +161,14 @@ where
 
 /// Tells blocking work whether it should give up.
 #[derive(Clone, Default)]
-pub(crate) struct StopSignal(Arc<AtomicBool>);
+pub struct StopSignal(Arc<AtomicBool>);
 
 impl StopSignal {
-    pub(crate) fn should_stop(&self) -> bool {
+    pub fn should_stop(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
 
-    fn stop(&self) {
+    pub fn stop(&self) {
         self.0.store(true, Ordering::Relaxed);
     }
 }

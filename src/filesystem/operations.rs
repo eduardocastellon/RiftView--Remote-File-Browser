@@ -4,13 +4,13 @@
 
 use super::metadata::{Entry, EntryKind, to_epoch_ms};
 use super::roots::Share;
-use super::writing::is_upload_file_name;
-use super::{FsError, RelPath, run_blocking};
+use super::{FsError, RelPath, is_internal_name, run_blocking};
 
-/// Partial upload files are invisible to devices, even if named directly.
+/// RiftView's temporary files are invisible to devices, even if named
+/// directly.
 fn refuse_partial_uploads(path: &RelPath) -> Result<(), FsError> {
     match path.file_name() {
-        Some(name) if is_upload_file_name(name) => Err(FsError::NotFound),
+        Some(name) if is_internal_name(name) => Err(FsError::NotFound),
         _ => Ok(()),
     }
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::error::AppError;
 use crate::filesystem::{FsError, writing};
+use crate::jobs;
 use crate::state::AppState;
 
 use super::uploads::Upload;
@@ -75,14 +76,21 @@ pub async fn remove_expired_uploads(state: &AppState, now_ms: u64) -> usize {
     removed
 }
 
-/// Run [`remove_expired_uploads`] now and then every few minutes, for as
-/// long as the server runs.
+/// Housekeeping for as long as the server runs:
+///
+/// - at startup, clean up moves interrupted by the restart;
+/// - now and every few minutes, remove expired uploads and forget move
+///   jobs that finished over a day ago.
 pub fn spawn_cleanup_task(state: AppState) {
     tokio::spawn(async move {
+        jobs::moves::recover_interrupted_jobs(&state).await;
+
         let mut timer = tokio::time::interval(CLEANUP_INTERVAL);
         loop {
-            timer.tick().await; // The first tick is immediate: clean up at startup.
-            remove_expired_uploads(&state, crate::filesystem::roots::now_ms()).await;
+            timer.tick().await; // The first tick is immediate.
+            let now = crate::filesystem::roots::now_ms();
+            remove_expired_uploads(&state, now).await;
+            jobs::moves::remove_old_jobs(&state, now);
         }
     });
 }

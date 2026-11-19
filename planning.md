@@ -14,7 +14,7 @@
 
 ---
 
-> **Status (2026-11-19):** Phases 1–6 are built. Phases 7–9 are not started. Each section below says what is built, what is planned, and where the build deliberately differs from the original plan.
+> **Status (2026-11-19):** Phases 1–7 are built. Phases 8–9 are not started. Each section below says what is built, what is planned, and where the build deliberately differs from the original plan.
 
 # 1. Backend Overview
 
@@ -181,17 +181,24 @@ The original plan had separate authentication and authorization modules; they ar
 
 Planned: per-share permissions for each device.
 
-### Filesystem Module (`filesystem/`), partly built
+### Filesystem Module (`filesystem/`), built
 
-Built:
 - Directory browsing (paged, sorted, stoppable).
 - File metadata.
 - Safe path resolution (`cap-std`).
 - File opening.
 - Shares (`roots.rs`, stored in SQLite).
 - Opaque file IDs.
+- File creation for uploads (`writing.rs`).
+- Rename, move, directory creation and deletion (`managing.rs`). Deletion goes to the Trash of the item's disk (`trash.rs`).
+- Copying between disks for moves (`copying.rs`).
+- Small OS-specific helpers (`os.rs`): a rename that never replaces, free space, and a folder's real path.
 
-Planned (Phase 7): file creation, rename and move, deletion, directory creation.
+### Jobs Module (`jobs/`), built (not in the original plan)
+
+- Background moves between shares on different disks: copy to a hidden temporary name, give it the real name, delete the original.
+- Records in SQLite (`move_jobs`), live progress in memory, cancellation.
+- Cleanup of jobs interrupted by a restart.
 
 ### Transfer Module (`transfers/`), built
 
@@ -274,7 +281,11 @@ riftview-api/
 |   |   ├── metadata.rs
 |   |   ├── ids.rs         opaque file IDs
 |   |   ├── operations.rs
-|   |   ├── writing.rs     upload partial files, free space, finishing
+|   |   ├── writing.rs     upload partial files, finishing
+|   |   ├── managing.rs    rename, move, new folder, delete
+|   |   ├── trash.rs       move to the disk's Trash (NSFileManager on macOS)
+|   |   ├── copying.rs     copying between disks, tree removal
+|   |   ├── os.rs          no-replace rename, free space, real path
 |   |   └── roots.rs       shares (SQLite)
 |   |
 |   ├── transfers/
@@ -284,13 +295,18 @@ riftview-api/
 |   |   ├── hashing.rs     SHA-256 + cache
 |   |   ├── limits.rs      concurrent transfer limits
 |   |   ├── uploads.rs     unfinished uploads and chunks (SQLite)
-|   |   └── cleanup.rs     cancelled / expired / failed uploads
+|   |   └── cleanup.rs     cancelled / expired / failed uploads; housekeeping task
+|   |
+|   ├── jobs/
+|   |   ├── mod.rs         background job records (SQLite) + live progress
+|   |   └── moves.rs       move-between-disks runner, restart recovery
 |   |
 |   ├── database/
 |   |   ├── mod.rs         connection, pragmas, migrations
 |   |   └── migrations/
 |   |       ├── 001_devices_and_shares.sql
-|   |       └── 002_uploads.sql
+|   |       ├── 002_uploads.sql
+|   |       └── 003_move_jobs.sql
 |   |
 |   ├── storage/           atomic writes for config, admin token, certificate
 |   |   └── mod.rs
@@ -306,7 +322,8 @@ riftview-api/
 |   ├── api_tests.rs
 |   ├── auth_tests.rs
 |   ├── security_tests.rs
-|   └── upload_tests.rs
+|   ├── upload_tests.rs
+|   └── manage_tests.rs
 |
 └── docs/
     └── auth-protocol.md
@@ -370,10 +387,14 @@ Not built (by design): `POST`, `PATCH` and `DELETE` on `/api/shares`. Only the h
 | GET | `/api/files/{id}` | `browse` | Built |
 | GET | `/api/files/{id}/download` | `read` | Built: `Range`, `If-Range`, `ETag` |
 | GET | `/api/files/{id}/hash` | `read` | Built: `{sha256, size, etag}` (not in the original plan) |
-| POST | `/api/files/{id}/rename` | `rename` | Planned, Phase 7 |
-| POST | `/api/files/{id}/move` | `move` | Planned, Phase 7 |
-| POST | `/api/shares/{id}/directories` | `upload` | Planned, Phase 7 |
-| DELETE | `/api/files/{id}` | `delete` | Planned, Phase 7 |
+| POST | `/api/files/{id}/rename` | `rename` | Built: `{name}` → item; `409` if taken |
+| POST | `/api/files/{id}/move` | `move` | Built: `{share_id?, path}` → `200` item (same disk) or `202` job (other disk); `409` if taken |
+| POST | `/api/shares/{id}/directories` | `upload` | Built: `{path, name}` → `201` folder |
+| DELETE | `/api/files/{id}` | `delete` | Built: file or whole folder → `{deleted: "trash" \| "permanent"}` |
+| GET | `/api/jobs/{id}` | `move` | Built (not in the original plan): move job progress and result |
+| DELETE | `/api/jobs/{id}` | `move` | Built (not in the original plan): cancel a running move |
+
+All of these need the share (both shares, for a move) to be writable.
 
 File identifiers are an opaque base64url encoding of (share ID, relative path). They are decoded and re-checked on every request, and clients never send host paths.
 
@@ -612,10 +633,10 @@ A successfully authenticated device must not automatically have unrestricted acc
 |---|---|---|
 | Browse | List shares and folders, see file details | Built, enforced |
 | Read | Download files and get their SHA-256 | Built, enforced |
-| Upload | Create new files (and folders, Phase 7) | Built for uploads (needs a writable share); folder creation planned (Phase 7) |
-| Rename | Rename files | Stored and checked; endpoints planned (Phase 7) |
-| Move | Move files | Stored and checked; endpoints planned (Phase 7) |
-| Delete | Delete files | Stored and checked; endpoints planned (Phase 7) |
+| Upload | Create new files and folders | Built, enforced (needs a writable share) |
+| Rename | Rename files and folders | Built, enforced (needs a writable share) |
+| Move | Move files and folders, follow move jobs | Built, enforced (both shares writable) |
+| Delete | Delete files and folders (to the Trash) | Built, enforced (needs a writable share) |
 | Manage Shares | Modify shared roots | **Not a device permission.** Only the host user can manage shares (admin API). |
 
 Permissions should be enforced by the backend for every operation.
@@ -797,7 +818,7 @@ Data folder (`~/Library/Application Support/RiftView/` on macOS, or `RIFTVIEW_DA
 ```text
 RiftView/
 |
-├── riftview.db           SQLite: shares, devices, device_permissions, uploads
+├── riftview.db           SQLite: shares, devices, device_permissions, uploads, move_jobs
 ├── riftview.db-wal       SQLite write-ahead log (while the server runs)
 ├── riftview.db-shm
 ├── config.json           server settings
@@ -817,6 +838,7 @@ Database tables (schema in `src/database/migrations/`):
 | `device_permissions` | One row per permission a device has |
 | `uploads` | Unfinished uploads: device, share, target folder, name, size, chunk size, expected SHA-256, activity times |
 | `upload_chunks` | One row per received, verified chunk |
+| `move_jobs` | Moves between disks: device, source, destination, state, error/warning, result; kept a day after finishing |
 
 Persist:
 - Host configuration (`config.json`).
@@ -861,7 +883,7 @@ Potential cache targets:
 Directory caches should have short expiration periods or invalidation mechanisms because files can be changed outside the application.
 
 **As built:**
-- In memory: which uploads are being finished; SHA-256 results (invalidated by file version), shares and devices (loaded from SQLite at startup, written through on change), sessions and pairing state.
+- In memory: which uploads are being finished; progress and stop signals of running move jobs; SHA-256 results (invalidated by file version), shares and devices (loaded from SQLite at startup, written through on change), sessions and pairing state.
 - Not built: a directory listing cache.
 
 Resource-management priorities:
@@ -1004,17 +1026,26 @@ Measure:
 
 Benchmark different chunk sizes and concurrency limits.
 
-**As built:** 103 tests (`cargo test`).
-- **Unit tests:** path parsing, Range parsing, ETags, hash cache, transfer limits, stop signal, migrations, crypto, dates, chunk arithmetic, rename candidates, reserved names.
+**As built:** 132 tests (`cargo test`).
+- **Unit tests:** path parsing, Range parsing, ETags, hash cache, transfer limits, stop signal, migrations, crypto, dates, chunk arithmetic, rename candidates, reserved names, no-replace rename, real paths, tree copy/removal, AppleDouble skipping, CLI definitions.
 - **`tests/api_tests.rs`:** browsing, metadata, downloads, resume, hashing, a file changing mid-download, limits, a 5 GiB sparse file.
 - **`tests/auth_tests.rs`:** pairing and attack cases, login, replay, expiry, revocation, persistence across restart.
 - **`tests/security_tests.rs`:** traversal, symlink escapes, named pipes, forged IDs.
 - **`tests/upload_tests.rs`:** out-of-order chunks, corrupt and wrong-size chunks, whole-file mismatch, name clashes, permissions and read-only shares, size limit, disk space, open-upload limits, per-device privacy, hidden partial files, restart, expiry, share removal.
+- **`tests/manage_tests.rs`:** rename (clash, case-only change, folders, bad names), move (within and between shares, clashes, loops, read-only destination), new folder, delete (files, whole folders, symlinks), permissions, read-only shares, and move jobs (copy, cancel, symlink refusal, privacy, restart recovery, busy shares).
+- **Checked by hand against an exFAT disk image** (not in the suite):
+  - moves between disks in both directions
+  - rename clashes
+  - the upload hard-link fallback
+  - delete to the volume's Trash
+  - `._` companion files being skipped
 
 Not yet covered:
 - config loading tests
 - a race test for swapping a folder for a symlink mid-lookup
-- the hard-link fallback on file systems without hard links (e.g. exFAT)
+- automated tests for moves between disks and exFAT behaviour (they need a second disk; checked by hand, see above)
+- the permanent-delete path on a real disk without a Trash (tests simulate it; the macOS "feature unsupported" code isn't checked against such a disk)
+- that a delete lands in `~/.Trash` on the startup disk. macOS privacy rules stop the test from reading it, but a delete on an exFAT image was checked to land in that disk's `.Trashes`.
 - performance measurements (§13.4)
 
 ---
@@ -1125,7 +1156,11 @@ Tasks:
 
 Deliverable: Complete authorized filesystem management.
 
-**Status: not started.** The permissions and the per-share `writable` flag already exist and are checked.
+**Status: done.**
+- Rename, move (within a share, between shares on the same disk, and between disks as a background job), new folder, delete. **Deletes always go to the Trash of the item's disk.** They're permanent only on a disk that has no Trash (macOS reports "feature unsupported"). Any other Trash failure deletes nothing (`409`). There is no setting to turn the Trash off.
+- Each operation needs its own permission plus writable shares.
+- Conflicts: rename, move and new folder never replace anything (`409`).
+- Partial failures: a move between disks copies under a hidden name and only deletes the original once the copy has its real name. A failure or cancel removes the copy and leaves the original. A restart marks interrupted jobs failed and removes their copies.
 
 ## Phase 8: Cross-Platform Integration
 

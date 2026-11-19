@@ -64,6 +64,21 @@ impl RelPath {
         self.names.last().map(String::as_str)
     }
 
+    /// The folder containing this path, e.g. `/a/b` → `/a`. The root has
+    /// no parent.
+    pub fn parent(&self) -> Option<Self> {
+        let (_, parent_names) = self.names.split_last()?;
+        Some(Self {
+            names: parent_names.to_vec(),
+        })
+    }
+
+    /// Is `self` the same as `other` or somewhere inside it? E.g. `/a/b` is
+    /// inside `/a`, but `/ab` is not.
+    pub fn is_inside_or_equal(&self, other: &RelPath) -> bool {
+        self.names.starts_with(&other.names)
+    }
+
     /// A new path with one more name on the end, e.g. `/a` + `b` = `/a/b`.
     pub fn join_name(&self, name: &str) -> Result<Self, FsError> {
         if name.is_empty() || name == "." || name.contains('/') || name.contains('\\') {
@@ -135,6 +150,23 @@ impl fmt::Display for RelPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parents_and_containment() {
+        let path = RelPath::parse("/a/b").unwrap();
+        assert_eq!(path.parent().unwrap().to_string(), "/a");
+        assert_eq!(
+            RelPath::parse("/a").unwrap().parent().unwrap(),
+            RelPath::root()
+        );
+        assert!(RelPath::root().parent().is_none());
+
+        let a = RelPath::parse("/a").unwrap();
+        assert!(path.is_inside_or_equal(&a));
+        assert!(a.is_inside_or_equal(&a));
+        assert!(!RelPath::parse("/ab").unwrap().is_inside_or_equal(&a));
+        assert!(!a.is_inside_or_equal(&path));
+    }
 
     fn parsed(input: &str) -> String {
         RelPath::parse(input).unwrap().to_string()

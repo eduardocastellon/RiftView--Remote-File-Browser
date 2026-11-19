@@ -91,7 +91,10 @@ pub async fn metadata(
 
 /// Turn a file ID from the URL into its share and path. Any bad or unknown
 /// ID is a plain 404, so clients can't probe for details.
-async fn look_up_file_id(state: &AppState, file_id: &str) -> Result<(Share, RelPath), AppError> {
+pub(super) async fn look_up_file_id(
+    state: &AppState,
+    file_id: &str,
+) -> Result<(Share, RelPath), AppError> {
     let file_id = FileId::decode(file_id).map_err(|_| AppError::NotFound)?;
     let share = state.share(&file_id.share_id).await?;
     Ok((share, file_id.path))
